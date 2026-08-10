@@ -1,0 +1,28 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test / output artifacts
+out/
+keyframes/
+*.wav
+*.mp4
+pipeline_results.json
+aligned_output.json
+representatives.json
+
+# Bench outputs
+bench/crv_out_*/
+bench/our_out_*/
+bench/bench_results.json
+bench/land_compare_results.json
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
