@@ -1,0 +1,5 @@
+opencv-python>=4.5
+numpy>=1.20
+# 可选：流式 ASR（缺省走 mock fallback，不影响管线核心功能）
+# sherpa-onnx>=1.10
+# 系统依赖：ffmpeg（用于抽音频）
