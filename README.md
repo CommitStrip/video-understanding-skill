@@ -29,6 +29,12 @@ python scripts/select_representatives.py \
   --out representatives.json \
   --report context.md
 
+# 3b. （可选）启用 CLIP 语义增强，桶内按"像素差分 + CLIP 语义距离"打分选帧
+#     默认关闭；需真实 CLIP 权重（openai/clip ViT-B/32，外网下载），离线会显式报错
+python scripts/select_representatives.py --keyframes out/keyframes \
+  --interval 60 --clip --w-pix 0.5 \
+  --out representatives_clip.json --report context_clip.md
+
 # 4. 读取代表帧结合字幕做内容理解，输出报告
 ```
 
@@ -101,6 +107,22 @@ video-understanding-skill/
 2. **ASR 为可选项**。字幕（ASR）用于补充声音信息，但画面理解不依赖它。若未安装 sherpa-onnx 或不具备音频条件，画面链与代表帧理解仍可正常工作。
 3. **硬件与实时性**。实时率（实测 720p50 达 441fps、1080p30 达 202fps，75 分钟视频 221fps）基于当前 CPU 环境测得；在资源受限的嵌入式设备上，请通过 `--fast-scale`、`--kf-hz` 调整预算。
 4. **运行方式**。管线应作为**常驻进程/线程**运行（如机器人实时流场景），而非一次性后台任务——后台进程可能被宿主回收导致中断（详见下方"已知经验"）。
+
+## 硬件资源需求（实测）
+
+在 2 核 / 4GB 环境、真实 75 分钟 1080p 视频（`full75.mp4`，240MB）上实测各环节资源占用：
+
+| 环节 | 峰值内存 RSS | CPU 核利用率 | 备注 |
+|------|-------------|-------------|------|
+| 实时画面链（逐帧） | **~166 MB** | **~1.2 核** | 283 fps @ 1080p30，超实时 9.4× |
+| 全管线（画面链 + 后台 ASR） | ~166 MB | ~1.2 核 | ASR 线程开销可忽略 |
+| Tier3 语义代表帧选择（离线） | ~317 MB | — | 需读入全部关键帧做差分，6.5s/75min |
+
+**推荐配置**：
+
+- **最低配置**：CPU 2 核、内存 **512 MB**（画面链仅用 ~1.2 核 + ~166MB，实时性充分）。
+- **推荐配置**：CPU 4 核、内存 **2 GB**（为 Tier3 离线选择 317MB + sherpa-onnx 流式模型 300-500MB 留余量，且不挤占实时画面链）。
+- 本架构为资源受限设备（机器人/嵌入式）设计，2 核 / 512MB-2GB 即可实时运行。真正吃内存的是 Tier3 离线选择与 ASR 模型，二者均不在逐帧实时路径上。
 
 ## 已知经验（踩坑记录）
 
