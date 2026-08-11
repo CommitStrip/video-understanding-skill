@@ -99,9 +99,11 @@ def _clip_dist(a, b):
 
 def load_keyframes(kf_dir):
     """扫描 keyframes 目录，返回 [(t, path), ...] 按时间排序。"""
+    if not os.path.isdir(kf_dir):
+        raise ValueError(f"关键帧目录不存在: {kf_dir}")
     items = []
     for f in sorted(os.listdir(kf_dir)):
-        m = re.search(r'_t([0-9.]+)s\.jpg', f)
+        m = re.search(r'_t([0-9]+(?:\.[0-9]+)?)s\.jpg$', f, re.IGNORECASE)
         if m:
             items.append((float(m.group(1)), os.path.join(kf_dir, f)))
     items.sort(key=lambda x: x[0])
@@ -127,6 +129,13 @@ def select_representatives(kf_dir, interval=60.0, dedup_threshold=0.0, clip=None
 
     返回: [{"t": float, "path": str}, ...]
     """
+    if interval <= 0:
+        raise ValueError("interval 必须大于 0")
+    if not 0 <= dedup_threshold <= 100:
+        raise ValueError("dedup_threshold 必须在 [0, 100] 范围内")
+    if not 0 <= w_pix <= 1:
+        raise ValueError("w_pix 必须在 [0, 1] 范围内")
+
     kfs = load_keyframes(kf_dir)
     if not kfs:
         return []
@@ -136,7 +145,7 @@ def select_representatives(kf_dir, interval=60.0, dedup_threshold=0.0, clip=None
         pix = _pixel_diff(cand['img'], first['img']) / 100.0  # 归一化 0-1
         if clip is None:
             return pix
-        sem = _clip_dist(cand['emb'], first['emb'])  # 0-1
+        sem = min(max(_clip_dist(cand['emb'], first['emb']) / 2.0, 0.0), 1.0)
         return w_pix * pix + (1.0 - w_pix) * sem
 
     # 步骤1：时间分桶，桶内选与桶首差异最大帧作为锚点
@@ -152,28 +161,48 @@ def select_representatives(kf_dir, interval=60.0, dedup_threshold=0.0, clip=None
         if t >= bucket_start + interval:
             if bucket:
                 first = bucket[0]
-                candidates.append(max(bucket, key=lambda x: _score(x, first)))
+                selected = max(bucket, key=lambda x: _score(x, first))
+                candidates.append({"t": selected["t"], "path": selected["p"], "reason": "bucket"})
             bucket = [node]
             bucket_start = t
         else:
             bucket.append(node)
     if bucket:
         first = bucket[0]
-        candidates.append(max(bucket, key=lambda x: _score(x, first)))
+        selected = max(bucket, key=lambda x: _score(x, first))
+        candidates.append({"t": selected["t"], "path": selected["p"], "reason": "bucket"})
+
+    # 首尾帧是理解开场和结尾的硬锚点；Tier 3 仍不能恢复 Tier 2 已漏掉的画面。
+    anchors = [
+        {"t": kfs[0][0], "path": kfs[0][1], "reason": "first"},
+        *candidates,
+        {"t": kfs[-1][0], "path": kfs[-1][1], "reason": "last"},
+    ]
+    unique = {}
+    for item in anchors:
+        unique[(item["t"], item["path"])] = item
+    candidates = sorted(unique.values(), key=lambda item: item["t"])
 
     # 步骤2：默认全部保留（时间完整性优先）；仅当显式开启去重时压缩单调内容
     if dedup_threshold <= 0:
-        return [{"t": round(c['t'], 1), "path": c['p']} for c in candidates]
+        return [
+            {"t": round(c["t"], 3), "path": c["path"], "reason": c["reason"]}
+            for c in candidates
+        ]
 
     final = []
-    final_hashes = []
+    previous_image = None
     for c in candidates:
-        is_redundant = False
-        if final_hashes:
-            is_redundant = _pixel_diff(c['img'], final_hashes[-1]) < dedup_threshold
+        image = cv2.imread(c["path"])
+        if image is None:
+            continue
+        is_hard_anchor = c["reason"] in {"first", "last"}
+        is_redundant = previous_image is not None and not is_hard_anchor
+        if is_redundant:
+            is_redundant = _pixel_diff(image, previous_image) < dedup_threshold
         if not is_redundant:
-            final.append({"t": round(c['t'], 1), "path": c['p']})
-            final_hashes.append(c['img'])
+            final.append({"t": round(c["t"], 3), "path": c["path"], "reason": c["reason"]})
+            previous_image = image
 
     return final
 
@@ -250,6 +279,8 @@ def main():
               f"设备 {clip_engine[2]})")
 
     info = summarize(args.keyframes)
+    if info["count"] == 0:
+        sys.exit("[Select] 错误: 关键帧目录中没有符合命名规则的 JPG 文件")
     print(f"[Select] 管线关键帧: {info['count']} 帧, 跨度 {info['span_s']}s, "
           f"平均间隔 {info['avg_interval_s']}s")
 

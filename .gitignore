@@ -10,7 +10,10 @@ keyframes/
 *.mp4
 pipeline_results.json
 aligned_output.json
+run_manifest.json
+events.jsonl
 representatives.json
+rt_validate/
 
 # Bench outputs
 bench/crv_out_*/

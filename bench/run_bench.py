@@ -1,88 +1,134 @@
-import os, sys, time, json, glob
+#!/usr/bin/env python3
+"""运行本项目基准；外部基线必须显式启用并单独安装。"""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import platform
+import subprocess
+import sys
+import time
+
+import cv2
 import numpy as np
 
-sys.path.insert(0, '/workspace/video-understanding-skill/scripts')
-from smart_pipeline import SmartPipeline
-from select_representatives import load_keyframes, select_representatives
+ROOT = Path(__file__).resolve().parents[1]
+BENCH = Path(__file__).resolve().parent
+SCRIPTS = ROOT / "scripts"
+sys.path.insert(0, str(SCRIPTS))
 
-BENCH = os.path.dirname(os.path.abspath(__file__))
-TESTS = ['aba', 'slow', 'hue', 'static']
+from integrated_pipeline import run_realtime_pipeline
+from select_representatives import select_representatives
 
-def run_crv(video):
-    """用 claude-real-video 处理，返回 (elapsed, n_frames, timestamps)"""
-    from claude_real_video import process
-    outdir = os.path.join(BENCH, f'crv_out_{os.path.basename(video)[:-4]}')
-    t0 = time.time()
-    r = process(video, outdir, do_transcribe=False)
-    elapsed = time.time() - t0
-    # 统计帧
-    tts = []
-    fj = r.frames_json_path if hasattr(r, 'frames_json_path') else None
-    if fj and os.path.exists(fj):
-        with open(fj) as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            for d in data:
-                if isinstance(d, dict):
-                    tts.append(d.get('t', d.get('timestamp', d.get('time', 0))))
-                elif isinstance(d, (int, float)):
-                    tts.append(d)
-    n = len(tts)
-    return elapsed, n, tts
+TESTS = ["aba", "slow", "hue", "static"]
 
-def run_ours(video):
-    """用我们的管线处理，返回 (pipeline_elapsed, pipe, reps, rep_ts)"""
-    from integrated_pipeline import run_realtime_pipeline
-    outdir = os.path.join(BENCH, f'our_out_{os.path.basename(video)[:-4]}')
-    os.makedirs(outdir, exist_ok=True)
-    t0 = time.time()
-    pipe, aligned, asr = run_realtime_pipeline(video, outdir, config={'keyframe_interval_hz': 1.5})
-    p_elapsed = time.time() - t0
-    # 代表帧
-    kfdir = os.path.join(outdir, 'keyframes')
-    t1 = time.time()
-    reps = select_representatives(kfdir, interval=2.0)
-    r_elapsed = time.time() - t1
-    rep_ts = [r['t'] for r in reps]
-    return p_elapsed, pipe, len(pipe.keyframes), rep_ts, r_elapsed
 
-results = []
-for name in TESTS:
-    video = f'{BENCH}/{name}.mp4'
-    print(f'\n===== {name} =====')
-    row = {'test': name}
+def _git_commit():
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
 
-    # crv
+
+def run_crv(video, output_dir):
     try:
-        e, n, tts = run_crv(video)
-        row['crv_s'] = round(e, 2)
-        row['crv_frames'] = n
-        row['crv_ts'] = [round(t,1) for t in tts]
-        print(f'  crv: {e:.2f}s, {n} frames')
-    except Exception as ex:
-        row['crv_s'] = f'ERR:{ex}'
-        print(f'  crv ERROR: {ex}')
+        from claude_real_video import process
+    except ImportError as exc:
+        raise RuntimeError(
+            "未安装 claude-real-video；不能生成外部基线。请固定版本后再运行 --baseline crv"
+        ) from exc
 
-    # ours
-    try:
-        e, pipe, kf_n, rep_ts, re = run_ours(video)
-        # 总帧数
-        row['our_s'] = round(e, 2)
-        row['our_keyframes'] = kf_n
-        row['our_reps'] = rep_ts
-        row['our_fps'] = pipe.frame_count / e if e > 0 else 0
-        row['our_repcalc_s'] = round(re, 2)
-        print(f'  ours: {e:.2f}s ({row["our_fps"]:.0f}fps), {kf_n} keyframes -> {len(rep_ts)} reps')
-    except Exception as ex:
-        row['our_s'] = f'ERR:{ex}'
-        print(f'  ours ERROR: {ex}')
+    started = time.perf_counter()
+    process(str(video), str(output_dir), do_transcribe=False)
+    elapsed = time.perf_counter() - started
+    frames_path = output_dir / "frames.json"
+    if not frames_path.is_file():
+        raise RuntimeError(f"外部基线没有生成预期文件: {frames_path}")
+    data = json.loads(frames_path.read_text(encoding="utf-8"))
+    frames = data if isinstance(data, list) else data.get("frames", [])
+    timestamps = [
+        float(item.get("timestamp_sec", item.get("t", item.get("timestamp", 0))))
+        for item in frames
+        if isinstance(item, dict)
+    ]
+    return {"elapsed_s": round(elapsed, 4), "frames": len(timestamps), "timestamps": timestamps}
 
-    results.append(row)
 
-print('\n\n===== 汇总 =====')
-for r in results:
-    print(json.dumps(r, ensure_ascii=False))
+def run_ours(video, output_dir, interval):
+    started = time.perf_counter()
+    pipe, _, _ = run_realtime_pipeline(
+        str(video),
+        str(output_dir),
+        config={"keyframe_interval_hz": 1.5},
+        visual_only=True,
+    )
+    pipeline_elapsed = time.perf_counter() - started
 
-with open(f'{BENCH}/bench_results.json', 'w') as f:
-    json.dump(results, f, ensure_ascii=False, indent=2)
-print(f'\n已保存: {BENCH}/bench_results.json')
+    selection_started = time.perf_counter()
+    representatives = select_representatives(str(output_dir / "keyframes"), interval=interval)
+    selection_elapsed = time.perf_counter() - selection_started
+    representatives_path = output_dir / "representatives.json"
+    representatives_path.write_text(
+        json.dumps({"representatives": representatives}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return {
+        "pipeline_elapsed_s": round(pipeline_elapsed, 4),
+        "selection_elapsed_s": round(selection_elapsed, 4),
+        "keyframes": len(pipe.keyframes),
+        "representatives": len(representatives),
+        "representative_timestamps": [item["t"] for item in representatives],
+        "processing_fps": round(pipe.frame_count / pipeline_elapsed, 2) if pipeline_elapsed else 0,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="视频代表帧基准")
+    parser.add_argument("--bench-dir", default=str(BENCH), help="测试视频和输出目录")
+    parser.add_argument("--baseline", choices=["none", "crv"], default="none")
+    parser.add_argument("--interval", type=float, default=2.0)
+    args = parser.parse_args()
+    if args.interval <= 0:
+        parser.error("interval 必须大于 0")
+
+    bench_dir = Path(args.bench_dir).resolve()
+    results = {
+        "schema_version": 1,
+        "environment": {
+            "python": sys.version,
+            "platform": platform.platform(),
+            "opencv": cv2.__version__,
+            "numpy": np.__version__,
+            "commit": _git_commit(),
+            "baseline": args.baseline,
+        },
+        "tests": [],
+    }
+
+    for name in TESTS:
+        video = bench_dir / f"{name}.mp4"
+        if not video.is_file():
+            raise FileNotFoundError(f"缺少测试视频: {video}；请先运行 gen_bench.py")
+        row = {"test": name}
+        our_output = bench_dir / f"our_out_{name}"
+        our_output.mkdir(parents=True, exist_ok=True)
+        row["ours"] = run_ours(video, our_output, args.interval)
+
+        if args.baseline == "crv":
+            baseline_output = bench_dir / f"crv_out_{name}"
+            baseline_output.mkdir(parents=True, exist_ok=True)
+            row["crv"] = run_crv(video, baseline_output)
+        results["tests"].append(row)
+
+    output_path = bench_dir / "bench_results.json"
+    output_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"基准结果: {output_path}")
+
+
+if __name__ == "__main__":
+    main()

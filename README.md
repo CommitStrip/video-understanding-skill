@@ -1,137 +1,239 @@
 # Video Understanding Skill
 
-把一段视频变成 **结构化、可被 LLM 高效消费的内容理解产物**。采用"三层压缩"设计：将 30fps 的十几万帧压缩为几十张语义代表帧 + 时间轴对齐字幕 + 运动段，让 AI 既能理解内容又不漏关键信息。
+一个本地视频预处理管线：把视频转换为可追溯的运动事件、镜头级关键帧、严格 ASR 字幕和语义代表帧，供下游多模态模型或业务程序继续分析。
 
-源自真实项目：75 分钟视频，管线产出 1609 张关键帧，LLM 经语义压缩后只需约 60-80 张代表帧即可完整理解。
+本项目不内置 LLM，也不承诺仅凭固定数量的代表帧就能完整理解任意视频。它解决的是“如何用有界资源生成结构化视频上下文”，不是完整的视频问答产品。
 
-## 核心价值
+## 设计原则
 
-- **实时预算分配**：快系统（逐帧运动检测）+ 慢系统（低频关键帧），可实时跑在机器人/产品上（实测 720p50 达 441fps，1080p30 达 202fps，均超实时数倍）。
-- **三层压缩**：原始帧 → 镜头级关键帧 → 语义代表帧，解决"镜头切换 ≠ 内容变化"的冗余问题。
-- **流式输出**：每帧产出增量事件，宿主无需等整段即可实时消费。
-- **多模态融合**：画面（运动+关键帧）+ 声音（流式 ASR）时间轴对齐，输出结构化语义流。
+- **ASR 不降级**：缺少 ffmpeg、sherpa-onnx、模型文件或识别失败时，整合流程明确失败，不生成模拟字幕。
+- **显式视觉模式**：仅需画面处理时使用 `--visual-only`；该模式不会伪造字幕，也不会生成 `aligned_output.json`。
+- **有界内存**：音频按块读取，内存中的事件历史有上限；完整事件流增量写入 `events.jsonl`。
+- **结果可追溯**：关键帧元数据包含实际 JPG 路径，运行清单记录输入规格、模式、ASR 状态和处理结果。
+- **验证不过度外推**：合成视频吞吐量和像素变化覆盖率只作为代理指标，不等同于真实语义准确率。
+
+## 处理层级
+
+| 层级 | 产物 | 作用 |
+| --- | --- | --- |
+| Tier 0 | 原始视频帧 | 原始输入 |
+| Tier 1 | 运动开始、持续、结束事件 | 快速发现明显画面变化 |
+| Tier 2 | 镜头级关键帧 | 时间定位和场景候选 |
+| Tier 3 | 首尾锚点与时间桶代表帧 | 控制下游视觉输入规模 |
+
+Tier 1 的候选框来自运动轮廓，不是目标检测框。Tier 3 只能从 Tier 2 已保存的关键帧中选择，不能恢复上游已经漏掉的画面。
+
+## 环境要求
+
+- Python 3.9+
+- OpenCV 与 NumPy
+- 完整 ASR 模式额外需要：
+  - 系统可执行的 ffmpeg
+  - `sherpa-onnx`
+  - 一个包含唯一 `encoder*.onnx`、`decoder*.onnx`、`joiner*.onnx` 和 `tokens.txt` 的模型目录
+
+### 安装视觉依赖
+
+```bash
+python -m venv .venv
+python -m pip install -r requirements.txt
+```
+
+Windows PowerShell 激活环境：
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+macOS/Linux 激活环境：
+
+```bash
+source .venv/bin/activate
+```
+
+### 安装 ASR Python 依赖
+
+```bash
+python -m pip install -r requirements-asr.txt
+ffmpeg -version
+```
+
+模型权重不包含在仓库中。请自行下载并审核相应模型的来源、许可证和哈希。
 
 ## 快速开始
 
+### 完整视觉 + ASR 模式
+
+ASR 是默认必需能力：
+
 ```bash
-# 1. 安装依赖
-pip install opencv-python numpy
-# 可选：流式 ASR（缺省走 mock fallback）
-pip install sherpa-onnx
+python scripts/integrated_pipeline.py \
+  --video input.mp4 \
+  --output out \
+  --asr-model-dir /path/to/sherpa-model
+```
 
-# 2. 跑管线提取结构化产物（关键帧 + 运动段 + ASR 字幕）
-python scripts/integrated_pipeline.py --video 视频.mp4 --output out/
+也可以设置环境变量：
 
-# 3. 压缩为语义代表帧（供 LLM 内容理解）
+```bash
+export SHERPA_ONNX_MODEL_DIR=/path/to/sherpa-model
+python scripts/integrated_pipeline.py --video input.mp4 --output out
+```
+
+Windows PowerShell：
+
+```powershell
+$env:SHERPA_ONNX_MODEL_DIR = "D:\models\sherpa-model"
+python scripts/integrated_pipeline.py --video input.mp4 --output out
+```
+
+### 显式视觉模式
+
+```bash
+python scripts/integrated_pipeline.py \
+  --video input.mp4 \
+  --output out \
+  --visual-only
+```
+
+该模式只表示“用户明确不需要音频理解”，不是 ASR 失败后的自动降级。
+
+## 输出
+
+```text
+out/
+├── run_manifest.json       # 输入规格、运行模式、ASR 状态和处理结果
+├── events.jsonl            # 完整增量视觉事件日志
+├── pipeline_results.json   # 事件统计、闭合运动段和关键帧清单
+├── aligned_output.json     # 仅完整 ASR 成功时生成
+└── keyframes/
+    └── kf_*.jpg
+```
+
+如果真实 ASR 失败，命令返回非零状态，`run_manifest.json` 标记失败，并且不会创建伪造的成功对齐结果。
+
+## 语义代表帧
+
+```bash
 python scripts/select_representatives.py \
   --keyframes out/keyframes \
   --interval 60 \
   --out representatives.json \
   --report context.md
-
-# 3b. （可选）启用 CLIP 语义增强，桶内按"像素差分 + CLIP 语义距离"打分选帧
-#     默认关闭；需真实 CLIP 权重（openai/clip ViT-B/32，外网下载），离线会显式报错
-python scripts/select_representatives.py --keyframes out/keyframes \
-  --interval 60 --clip --w-pix 0.5 \
-  --out representatives_clip.json --report context_clip.md
-
-# 4. 读取代表帧结合字幕做内容理解，输出报告
 ```
 
-## 目录结构
+选择器始终保留首帧和尾帧锚点，并在各时间桶中选取差异较大的候选帧。可以显式开启连续锚点去重：
 
+```bash
+python scripts/select_representatives.py \
+  --keyframes out/keyframes \
+  --interval 60 \
+  --dedup-threshold 8 \
+  --out representatives.json
 ```
+
+可选 CLIP 增强只用于离线 Tier 3 选帧：
+
+```bash
+python scripts/select_representatives.py \
+  --keyframes out/keyframes \
+  --interval 60 \
+  --clip \
+  --w-pix 0.5 \
+  --out representatives_clip.json
+```
+
+CLIP 依赖和权重未列入核心依赖；启用前需单独审查和安装。缺少依赖或权重时会明确失败。
+
+## 流式视觉 API
+
+```python
+from scripts.smart_pipeline import SmartPipeline
+
+pipeline = SmartPipeline({
+    "fast_scale": 0.25,
+    "keyframe_interval_hz": 1.5,
+    "event_history_limit": 2000,
+})
+
+for frame, timestamp in video_stream:
+    for event in pipeline.process_frame(frame, timestamp):
+        host.consume(event)
+
+for event in pipeline.finalize(last_timestamp):
+    host.consume(event)
+```
+
+宿主应持续消费事件；内存中只保留最近一段历史，准确总数和完整事件保存在输出统计与 JSONL 日志中。
+
+## 验证
+
+### 单元测试
+
+```bash
+python -m unittest discover -s tests -v
+python -m compileall scripts bench tests
+```
+
+### 视觉吞吐量冒烟测试
+
+```bash
+python scripts/validate_realtime.py --output rt_validate --duration 10
+```
+
+该测试只检查合成视频上的视觉处理吞吐量，不包含真实 ASR、长稳运行、峰值内存或真实视频准确率。
+
+### 可复现基准
+
+```bash
+python bench/gen_bench.py --output bench
+python bench/run_bench.py --bench-dir bench --baseline none
+python bench/land_compare.py --bench-dir bench
+```
+
+外部 `claude-real-video` 基线必须显式启用并固定版本：
+
+```bash
+python bench/run_bench.py --bench-dir bench --baseline crv
+```
+
+`land_compare.py` 输出的是“一秒像素变化覆盖代理指标”，不是语义准确率、人物识别准确率或内容理解召回率。
+
+## 已知限制
+
+- 固定阈值的帧差法对镜头抖动、全局光照变化和复杂压缩噪声较敏感。
+- 当前视频时间轴使用固定 FPS 计算，不适合需要严格 PTS 对齐的可变帧率视频。
+- ASR 段时间来自分块解码，不是词级强制对齐结果。
+- 项目不提供目标检测、OCR、人物跟踪、说话人分离或最终自然语言报告生成。
+- “代表帧覆盖像素变化”不能证明“代表帧覆盖全部语义”。生产使用前必须在目标视频集上建立人工标注验收集。
+
+## 项目结构
+
+```text
 video-understanding-skill/
-├── SKILL.md                        # Skill 定义（含完整工作流指引）
+├── SKILL.md
 ├── README.md
 ├── LICENSE
 ├── requirements.txt
-└── scripts/
-    ├── smart_pipeline.py           # 实时预算分配 · 画面链（快/慢双系统）
-    ├── integrated_pipeline.py      # 三通道流式编排（画面+声音+对齐）
-    ├── asr_sherpa.py               # 流式 ASR 声音链（sherpa-onnx / fallback）
-    ├── select_representatives.py   # Tier3 语义代表帧选择（内容理解层）
-    └── validate_realtime.py        # 实时率验证（720p50 / 1080p30）
-└── bench/                          # 对比基准（与 claude-real-video 落地实测）
-    ├── gen_bench.py                # 生成 4 组可控测试视频
-    ├── run_bench.py                # 跑双方管线
-    └── land_compare.py             # 输出速度/准确性对比表
+├── requirements-asr.txt
+├── requirements-dev.txt
+├── scripts/
+│   ├── smart_pipeline.py
+│   ├── integrated_pipeline.py
+│   ├── asr_sherpa.py
+│   ├── select_representatives.py
+│   └── validate_realtime.py
+├── bench/
+│   ├── gen_bench.py
+│   ├── run_bench.py
+│   └── land_compare.py
+└── tests/
 ```
 
-## 三层压缩理念
+## 数据与安全
 
-| 层级 | 内容 | 数量级 | 用途 |
-|------|------|--------|------|
-| Tier 0 | 原始帧 | 30fps（13万帧） | 播放 |
-| Tier 1 | 快系统运动事件 | 逐帧 | 实时感知"有没有事发生" |
-| Tier 2 | 镜头级关键帧 | 1-2s/张（~1600张） | 精确时间定位、镜头切换 |
-| Tier 3 | **语义代表帧** | 30-60s/张（~60-150张） | **给 LLM 做内容理解** |
-
-## 与 claude-real-video 对比（落地实测）
-
-我们用 4 组可控测试视频（640x360@30fps，12s），对 [claude-real-video (crv)](https://github.com/davecap/claude-real-video) 与本 Skill 做了同一套产物下的速度与准确性对比。准确性指标：将时间轴切成 1s 桶、取桶首尾像素差分作为"该秒内容变化量"，超过 3% 视为有变化；覆盖率 = 被选中帧覆盖的有变化秒数占比。
-
-| 测试 | 场景 | crv 帧   | crv 覆盖率 | crv 耗时 | 本 Skill 帧 | 本 Skill 覆盖率 | 本 Skill 耗时 |
-|------|------|---------|-----------|---------|------------|----------------|--------------|
-| aba   | A→B→A 场景切换 | 2   | —（无连续变化） | 1.63s | 2 | —（无连续变化） | 0.45s |
-| slow  | 全屏缓慢渐变 | 12  | 100%       | 1.68s | 6 | 100%       | 0.48s |
-| hue   | 纯色色相渐变 | 12  | 100%       | 1.62s | 6 | 100%       | 0.45s |
-| static| 静态画面+末尾突变 | 1   | **0%**      | 1.66s | 2 | **100%**   | 0.42s |
-
-结论：
-
-- **准确性**：在 `static` 场景中，crv 只保留首帧、完全漏掉末尾（11s 处 Δ22.7%）的场景突变，覆盖率 0%；本 Skill 以 2 帧完整捕获（100%）。crv 的"密度下限"策略在信号稀疏时容易漏掉尾部关键变化。
-- **精简度**：`slow`/`hue` 上 crv 每 1s 选 1 帧（12 帧），本 Skill 用时间分桶 + 像素差分去重只需 6 帧即达相同覆盖率，冗余减半，LLM 消费更省 token。
-- **速度**：本 Skill 端到端约 **0.42-0.48s**，crv 约 **1.62-1.68s**，快约 **3.5 倍**。
-
-复现（在 `bench/` 目录下）：`python gen_bench.py` 生成 4 组测试视频，`python run_bench.py` 跑双方管线，`python land_compare.py` 输出以上对比表。
-
-## 作为 AI Skill 使用
-
-本目录同时是 [TRAE](https://trae.ai) 兼容的 Skill。将本仓库放入 skills 目录后，AI 会在用户要求"理解这个视频 / 分析视频内容 / 提取视频信息"时自动调用 `SKILL.md` 中的工作流。
-
-## 致谢与版权（重要）
-
-本项目的声音链（ASR）基于 **sherpa-onnx** 流式语音识别引擎，该引擎由 **Xiaomi（小米）** 开源维护。使用本项目前请务必周知：
-
-- **上游项目**：本仓库的 `scripts/asr_sherpa.py` 依赖 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)（k2-fsa / Xiaomi 维护的流式中英双语 ASR 引擎）。
-- **模型权重**：默认引用的流式模型为 `sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20`，其权重与使用条款遵循 sherpa-onnx 上游的 [Apache-2.0 开源协议](https://github.com/k2-fsa/sherpa-onnx) 及模型自身发布说明。
-- **本仓库仅封装**：本项目仅在 `asr_sherpa.py` 中对 sherpa-onnx 做了轻量封装（抽音频 → 流式解码 → 增量落盘），未修改其核心逻辑。任何对 sherpa-onnx 的二次分发、商用，请自行遵守其上游许可证与模型条款。
-- **fallback 说明**：未安装 sherpa-onnx 时，ASR 自动退化为 mock fallback（仅占位，不产出真实字幕），不影响画面链与代表帧核心功能。
-
-## 使用注意事项
-
-为获得正确的内容理解结果，请务必遵守以下约束：
-
-1. **必须使用具备视觉能力的多模态模型**。本 Skill 的内容理解依赖"读取代表帧图片"（Tier 3 语义代表帧 + 关键帧），因此下游 LLM **必须支持图像输入**（如带视觉的多模态模型）。若使用纯文本模型（如部分仅文本的 API），将无法读取画面，内容理解会完全失效。这是本项目最关键的软性前提。
-2. **ASR 为可选项**。字幕（ASR）用于补充声音信息，但画面理解不依赖它。若未安装 sherpa-onnx 或不具备音频条件，画面链与代表帧理解仍可正常工作。
-3. **硬件与实时性**。实时率（实测 720p50 达 441fps、1080p30 达 202fps，75 分钟视频 221fps）基于当前 CPU 环境测得；在资源受限的嵌入式设备上，请通过 `--fast-scale`、`--kf-hz` 调整预算。
-4. **运行方式**。管线应作为**常驻进程/线程**运行（如机器人实时流场景），而非一次性后台任务——后台进程可能被宿主回收导致中断（详见下方"已知经验"）。
-
-## 硬件资源需求（实测）
-
-在 2 核 / 4GB 环境、真实 75 分钟 1080p 视频（`full75.mp4`，240MB）上实测各环节资源占用：
-
-| 环节 | 峰值内存 RSS | CPU 核利用率 | 备注 |
-|------|-------------|-------------|------|
-| 实时画面链（逐帧） | **~166 MB** | **~1.2 核** | 283 fps @ 1080p30，超实时 9.4× |
-| 全管线（画面链 + 后台 ASR） | ~166 MB | ~1.2 核 | ASR 线程开销可忽略 |
-| Tier3 语义代表帧选择（离线） | ~317 MB | — | 需读入全部关键帧做差分，6.5s/75min |
-
-**推荐配置**：
-
-- **最低配置**：CPU 2 核、内存 **512 MB**（画面链仅用 ~1.2 核 + ~166MB，实时性充分）。
-- **推荐配置**：CPU 4 核、内存 **2 GB**（为 Tier3 离线选择 317MB + sherpa-onnx 流式模型 300-500MB 留余量，且不挤占实时画面链）。
-- 本架构为资源受限设备（机器人/嵌入式）设计，2 核 / 512MB-2GB 即可实时运行。真正吃内存的是 Tier3 离线选择与 ASR 模型，二者均不在逐帧实时路径上。
-
-## 已知经验（踩坑记录）
-
-在真实长视频（75 分钟普法节目，135,744 帧）实测中确认：
-
-- **处理速率**：画面链稳定 221.6fps，超实时 7.4 倍；端到端 612 秒处理完 75 分钟视频。
-- **三层压缩**：1549 张镜头级关键帧 → 70 张语义代表帧（压缩到 4.5%），人工抽帧验证内容连贯、覆盖充分、无漏帧。
-- **后台进程陷阱**：用 `nohup ... &` 后台启动时，进程会被运行环境回收导致"假死"（日志停在某帧、进程消失、无报错）。应使用前台常驻进程或 `blocking=false` 方式运行。
+核心流程不调用云端 LLM。完整 ASR 使用本地 ffmpeg、sherpa-onnx 和本地模型；临时 WAV 使用唯一临时文件，并在识别结束后删除。任何外部模型下载、CLIP 权重或下游服务的数据传输都需要部署者单独审核。
 
 ## License
 
-MIT © 2026
+[MIT License](LICENSE)。第三方库和模型权重遵循各自上游许可证。

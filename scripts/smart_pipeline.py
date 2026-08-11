@@ -35,19 +35,31 @@ class SmartPipeline:
     def __init__(self, config=None):
         cfg = config or {}
         # === 快系统参数（每帧，最轻）===
-        self.fast_scale = cfg.get('fast_scale', 0.25)           # 降采样比例，0.25 ≈ 1/16 像素
+        self.fast_scale = float(cfg.get('fast_scale', 0.25))    # 降采样比例，0.25 ≈ 1/16 像素
         self.motion_thresh = cfg.get('motion_thresh', 25)       # 帧差阈值
         self.min_area_ratio = cfg.get('min_area_ratio', 0.001)  # 最小运动面积占小图比例
         self.semantic_gate_ratio = cfg.get('semantic_gate_ratio', 0.003)  # 语义门控（占小图比例）
-        self.motion_confirm_frames = cfg.get('motion_confirm_frames', 3)  # 运动起始需连续帧
-        self.motion_window = cfg.get('motion_window', 4)  # 时间累积窗口：对比 N 帧前的参考帧捕捉慢速运动
+        self.motion_confirm_frames = int(cfg.get('motion_confirm_frames', 3))  # 运动起始需连续帧
+        self.motion_window = int(cfg.get('motion_window', 4))  # 帧窗口：对比 N 帧前的参考帧
 
         # === 慢系统参数（低频 + 触发式）===
-        self.keyframe_interval_hz = cfg.get('keyframe_interval_hz', 1.5)   # 抽取频率 1.5Hz
+        self.keyframe_interval_hz = float(cfg.get('keyframe_interval_hz', 1.5))  # 最大检查频率 1.5Hz
         self.keyframe_diff = cfg.get('keyframe_diff', 10)                  # 内容变化打分阈值
         self.phash_threshold = cfg.get('phash_threshold', 12)              # pHash 距离阈值
         self.hist_threshold = cfg.get('hist_threshold', 0.5)               # 直方图相关阈值
         self.dedup_threshold = cfg.get('dedup_threshold', 5)               # 去重 hamming 距离
+
+        self.event_history_limit = int(cfg.get('event_history_limit', 2000))
+        if not 0 < self.fast_scale <= 1.0:
+            raise ValueError("fast_scale 必须在 (0, 1] 范围内")
+        if self.keyframe_interval_hz <= 0:
+            raise ValueError("keyframe_interval_hz 必须大于 0")
+        if self.motion_confirm_frames < 1:
+            raise ValueError("motion_confirm_frames 必须至少为 1")
+        if self.motion_window < 2:
+            raise ValueError("motion_window 必须至少为 2 帧")
+        if self.event_history_limit < 0:
+            raise ValueError("event_history_limit 不能为负数")
 
         # === 快系统状态 ===
         self.prev_small = None
@@ -57,6 +69,7 @@ class SmartPipeline:
         self.motion_start_t = None
         self.current_segment = None
         self.fast_small_size = None
+        self.last_timestamp = None
 
         # === 慢系统状态 ===
         self.prev_kf_gray = None
@@ -64,9 +77,16 @@ class SmartPipeline:
         self.prev_hist = None
         self.kf_hashes = []
         self.last_keyframe_t = -1.0
+        self.last_keyframe_check_t = -1.0
 
         # === 输出（流式累积）===
-        self.events = []
+        self.events = deque(maxlen=self.event_history_limit)
+        self.event_counts = {
+            "motion_start": 0,
+            "motion": 0,
+            "motion_end": 0,
+            "keyframe": 0,
+        }
         self.motion_segments = []
         self.keyframes = []
 
@@ -82,6 +102,14 @@ class SmartPipeline:
         实时预算：快系统每帧跑（最轻），慢系统按频率+触发插空跑。
         """
         t_start = time.time()
+        if frame is None or not hasattr(frame, "shape"):
+            raise ValueError("frame 必须是有效的图像数组")
+        timestamp = float(timestamp)
+        if not np.isfinite(timestamp):
+            raise ValueError("timestamp 必须是有限数值")
+        if self.last_timestamp is not None and timestamp < self.last_timestamp:
+            raise ValueError("timestamp 必须单调不减")
+        self.last_timestamp = timestamp
 
         # 共用降采样小图（快/慢系统复用，省算力）
         if self.fast_scale != 1.0:
@@ -107,14 +135,20 @@ class SmartPipeline:
             if kf:
                 out_events.append(kf)
 
-        # 流式返回 + 累积到历史（供摘要 / 对齐层使用）
-        if out_events:
-            self.events.extend(out_events)
+        self._record_events(out_events)
 
         self.frame_count += 1
         self.process_times.append(time.time() - t_start)
 
         return out_events
+
+    def _record_events(self, events):
+        """记录准确计数，并仅保留有界事件历史，避免长视频内存无限增长。"""
+        for event in events:
+            event_type = event.get("type")
+            if event_type in self.event_counts:
+                self.event_counts[event_type] += 1
+            self.events.append(event)
 
     # ==================== 快系统 ====================
 
@@ -163,7 +197,7 @@ class SmartPipeline:
             max_box_area = max(b["area"] for b in boxes)
             if max_box_area < self.semantic_gate_ratio * h * w:
                 self.motion_confirm = 0
-                return events
+                return self._close_motion(timestamp)
 
             self.motion_confirm += 1
             if self.motion_confirm >= self.motion_confirm_frames and not self.motion_active:
@@ -196,32 +230,50 @@ class SmartPipeline:
         else:
             # 无有效运动
             self.motion_confirm = 0
-            if self.motion_active:
-                self.motion_active = False
-                if self.current_segment:
-                    duration = self.current_segment["end"] - self.current_segment["start"]
-                    if duration >= 0.5:
-                        self.motion_segments.append(self.current_segment)
-                    events.append({
-                        "type": "motion_end",
-                        "t": round(timestamp, 3),
-                        "duration": round(duration, 3)
-                    })
-                self.current_segment = None
+            events.extend(self._close_motion(timestamp))
 
+        return events
+
+    def _close_motion(self, timestamp):
+        """闭合当前运动段；没有活动运动时为空操作。"""
+        if not self.motion_active or not self.current_segment:
+            return []
+
+        self.motion_active = False
+        end_t = max(float(timestamp), float(self.current_segment["end"]))
+        self.current_segment["end"] = round(end_t, 3)
+        duration = end_t - float(self.current_segment["start"])
+        segment = dict(self.current_segment)
+        if duration >= 0.5:
+            self.motion_segments.append(segment)
+        self.current_segment = None
+        return [{
+            "type": "motion_end",
+            "t": round(end_t, 3),
+            "segment_start": segment["start"],
+            "duration": round(duration, 3),
+        }]
+
+    def finalize(self, timestamp=None):
+        """在文件结束或流关闭时刷新未闭合的运动段。可重复调用。"""
+        if timestamp is None:
+            timestamp = self.last_timestamp if self.last_timestamp is not None else 0.0
+        events = self._close_motion(float(timestamp))
+        self._record_events(events)
         return events
 
     def _should_check_keyframe(self, timestamp):
         """慢系统触发决策：低频 + 快系统报有内容"""
-        if self.last_keyframe_t < 0:
-            return True  # 第一帧
-        # 至少间隔 1/interval_hz 秒
-        if timestamp - self.last_keyframe_t < 1.0 / self.keyframe_interval_hz:
+        interval = 1.0 / self.keyframe_interval_hz
+        if self.last_keyframe_check_t >= 0 and timestamp - self.last_keyframe_check_t < interval:
             return False
-        # 要么距上次足够久（强制兜底），要么当前有运动
-        forced = (timestamp - self.last_keyframe_t) > (3.0 / self.keyframe_interval_hz)
-        has_motion = self.motion_active
-        return forced or has_motion
+
+        first_frame = self.last_keyframe_t < 0
+        forced = not first_frame and timestamp - self.last_keyframe_t >= 3.0 * interval
+        should_check = first_frame or forced or self.motion_active
+        if should_check:
+            self.last_keyframe_check_t = timestamp
+        return should_check
 
     # ==================== 慢系统 ====================
 
@@ -233,12 +285,13 @@ class SmartPipeline:
             self.prev_hist = self._compute_hist(color)
             self.kf_hashes.append(self.prev_phash)
             self.last_keyframe_t = timestamp
-            self.keyframes.append({
+            record = {
                 "t": round(timestamp, 3),
                 "frame_idx": self.frame_count,
                 "reason": "first_frame"
-            })
-            return {"type": "keyframe", "t": round(timestamp, 3), "reason": "first_frame"}
+            }
+            self.keyframes.append(record)
+            return {"type": "keyframe", **record}
 
         diff = cv2.absdiff(self.prev_kf_gray, gray)
         score = float(np.mean(diff))
@@ -265,20 +318,15 @@ class SmartPipeline:
             self.prev_hist = hist
             self.kf_hashes.append(phash)
             self.last_keyframe_t = timestamp
-            self.keyframes.append({
+            record = {
                 "t": round(timestamp, 3),
                 "frame_idx": self.frame_count,
                 "score": round(score, 2),
                 "phash_dist": int(phash_dist),
                 "hist_corr": round(hist_corr, 3)
-            })
-            return {
-                "type": "keyframe",
-                "t": round(timestamp, 3),
-                "score": round(score, 2),
-                "phash_dist": int(phash_dist),
-                "hist_corr": round(hist_corr, 3)
             }
+            self.keyframes.append(record)
+            return {"type": "keyframe", **record}
         return None
 
     # ==================== 特征计算 ====================
@@ -305,28 +353,55 @@ class SmartPipeline:
 
     # ==================== 流式对齐层 ====================
 
-    def align_asr_streaming(self, segments):
+    def align_asr_streaming(self, segments, video_end=None):
         """
         时间轴对齐融合：流式 ASR 增量段 + 画面事件（流式消费友好）
         输入: [{"t": float, "text": str}, ...]
         输出: [{"start","end","text","linked_motion_events","linked_keyframes","motion_types"}, ...]
         """
-        motion_events = [e for e in self.events if e["type"].startswith("motion")]
-        keyframe_events = [e for e in self.events if e["type"] == "keyframe"]
+        if not segments:
+            return []
+        starts = []
+        for segment in segments:
+            start = segment.get("start", segment.get("t"))
+            if start is None:
+                raise ValueError("ASR 段缺少 start/t 时间戳")
+            starts.append(float(start))
+        if starts != sorted(starts):
+            raise ValueError("ASR 段必须按时间升序排列")
 
         aligned = []
         for i, seg in enumerate(segments):
-            t0 = seg["t"]
-            t1 = segments[i + 1]["t"] if i + 1 < len(segments) else t0 + 2.0
-            linked_motion = [e for e in motion_events if t0 <= e["t"] <= t1]
-            linked_kf = [k for k in keyframe_events if t0 <= k["t"] <= t1]
+            t0 = starts[i]
+            explicit_end = seg.get("end")
+            if explicit_end is not None:
+                t1 = float(explicit_end)
+            elif i + 1 < len(segments):
+                t1 = starts[i + 1]
+            elif video_end is not None:
+                t1 = float(video_end)
+            else:
+                t1 = t0
+            if t1 < t0:
+                raise ValueError("ASR 段 end 不能早于 start")
+
+            linked_motion = [
+                item for item in self.motion_segments
+                if float(item["start"]) < t1 and float(item["end"]) > t0
+            ]
+            is_last = i + 1 == len(segments)
+            linked_kf = [
+                item for item in self.keyframes
+                if t0 <= float(item["t"]) and (float(item["t"]) <= t1 if is_last else float(item["t"]) < t1)
+            ]
             aligned.append({
                 "start": round(t0, 2),
                 "end": round(t1, 2),
                 "text": seg["text"],
-                "linked_motion_events": len(linked_motion),
+                "linked_motion_segments": len(linked_motion),
                 "linked_keyframes": len(linked_kf),
-                "motion_types": list(set(e["type"] for e in linked_motion))
+                "motion_segments": linked_motion,
+                "keyframes": linked_kf,
             })
         return aligned
 
@@ -337,10 +412,11 @@ class SmartPipeline:
         avg_fps = 1.0 / avg_process if avg_process > 0 else 0
         return {
             "total_frames": self.frame_count,
-            "motion_events": len([e for e in self.events if e["type"].startswith("motion")]),
+            "motion_events": sum(self.event_counts[name] for name in ("motion_start", "motion", "motion_end")),
             "motion_segments": len(self.motion_segments),
             "keyframes": len(self.keyframes),
-            "total_events": len(self.events),
+            "total_events": sum(self.event_counts.values()),
+            "retained_event_history": len(self.events),
             "avg_process_time_ms": round(avg_process * 1000, 2),
             "avg_fps": round(avg_fps, 1),
             "fast_scale": self.fast_scale,
@@ -349,14 +425,12 @@ class SmartPipeline:
 
     def save_results(self, output_path):
         results = {
+            "schema_version": 1,
             "summary": self.get_summary(),
             "motion_segments": self.motion_segments,
             "keyframes": self.keyframes,
             "events_summary": {
-                "motion_start": len([e for e in self.events if e["type"] == "motion_start"]),
-                "motion": len([e for e in self.events if e["type"] == "motion"]),
-                "motion_end": len([e for e in self.events if e["type"] == "motion_end"]),
-                "keyframe": len([e for e in self.events if e["type"] == "keyframe"]),
+                **self.event_counts,
             }
         }
         with open(output_path, 'w', encoding='utf-8') as f:

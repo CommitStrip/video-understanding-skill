@@ -1,228 +1,329 @@
 #!/usr/bin/env python3
-"""
-integrated_pipeline.py - 实时预算分配 · 三通道流式编排入口
-=============================================================
-通道1+2: 画面链（快系统运动流 + 慢系统关键帧）—— 实时前台，逐帧流式输出
-通道3:   声音链（流式ASR）—— 后台并行，逐块产出增量文本
-对齐层:   时间轴对齐融合 → 宿主可实时消费的结构化语义流
+"""视频画面链 + 严格 ASR + 可追溯输出的编排入口。"""
 
-实时预算：
-  前台画面链  每帧处理完立即把事件交给宿主（on_event 回调），宿主无需等整段。
-  后台声音链  与画面链并行跑，不阻塞画面链的实时性。
-"""
-
-import cv2
+import argparse
+from collections import Counter, deque
 import json
-import time
 import os
 import sys
-import argparse
 import threading
+import time
+
+import cv2
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from smart_pipeline import SmartPipeline
 from asr_sherpa import (
-    extract_audio, load_wav, load_streaming_recognizer,
-    transcribe_streaming
+    ASRError,
+    ASRRuntimeError,
+    extract_audio,
+    load_streaming_recognizer,
+    require_ffmpeg,
+    transcribe_wav_streaming,
 )
 
 
 class StreamingConsumer:
-    """
-    流式增量的宿主侧消费者。
-    宿主把 process_frame/on_event 产出的每个事件立即喂给它，它实时累积并可由宿主随时读取。
-    """
+    """有界历史的事件消费者；准确总数由 Counter 独立维护。"""
 
-    def __init__(self):
-        self.events = []          # 全部事件（时间序）
-        self.motion_segments = []  # 已闭合的运动段
-        self.keyframes = []        # 关键帧
+    def __init__(self, history_limit=2000):
+        if history_limit < 0:
+            raise ValueError("history_limit 不能为负数")
+        self.events = deque(maxlen=history_limit)
+        self.counts = Counter()
+        self.motion_segments = []
+        self.keyframes = []
         self._lock = threading.Lock()
 
-    def consume(self, ev):
-        """喂入一个事件，立即记录（线程安全）。"""
+    def consume(self, event):
         with self._lock:
-            self.events.append(ev)
-            if ev["type"] == "motion_end":
+            self.events.append(event)
+            self.counts[event["type"]] += 1
+            if event["type"] == "motion_end":
                 self.motion_segments.append({
-                    "start": ev.get("segment_start"),
-                    "end": ev["t"],
-                    "duration": ev.get("duration")
+                    "start": event["segment_start"],
+                    "end": event["t"],
+                    "duration": event["duration"],
                 })
-            elif ev["type"] == "keyframe":
-                self.keyframes.append(ev)
+            elif event["type"] == "keyframe":
+                self.keyframes.append(event)
 
     def snapshot(self):
-        """返回当前已消费事件的快照。"""
         with self._lock:
             return {
                 "events": list(self.events),
+                "counts": dict(self.counts),
                 "motion_segments": list(self.motion_segments),
                 "keyframes": list(self.keyframes),
-                "live": True,
-                "event_count": len(self.events)
+                "event_count": sum(self.counts.values()),
+                "retained_event_history": len(self.events),
             }
 
 
-def _asr_job(video_path, wav_path, out_segments, sr=16000):
-    """后台声音链：流式ASR，阻塞直到完成，写入 out_segments。"""
-    samples, sr2 = load_wav(wav_path, sr)
-    if len(samples) == 0:
-        return
-    recognizer = load_streaming_recognizer()
-    segs = transcribe_streaming(recognizer, samples, sr2)
-    out_segments.extend(segs)
+def _write_json(path, payload):
+    with open(path, "w", encoding="utf-8") as output:
+        json.dump(payload, output, ensure_ascii=False, indent=2)
 
 
-def run_realtime_pipeline(video_path, output_dir=None, save_keyframes=True,
-                          config=None, on_event=None):
+def _asr_job(video_path, recognizer, out_segments, state, sr=16000):
+    """在后台抽取并流式读取音频；异常通过 state 返回主线程。"""
+    wav_path = None
+    try:
+        wav_path = extract_audio(video_path, sr=sr)
+        out_segments.extend(transcribe_wav_streaming(recognizer, wav_path, sr=sr))
+        state["status"] = "succeeded"
+    except Exception as exc:
+        state["status"] = "failed"
+        state["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        if wav_path and os.path.exists(wav_path):
+            os.unlink(wav_path)
+
+
+def _attach_keyframe_file(pipe, event, relative_path):
+    event["file"] = relative_path
+    for record in reversed(pipe.keyframes):
+        if record.get("frame_idx") == event.get("frame_idx"):
+            record["file"] = relative_path
+            return
+    raise RuntimeError("关键帧事件无法关联到管线元数据")
+
+
+def run_realtime_pipeline(
+    video_path,
+    output_dir=None,
+    save_keyframes=True,
+    config=None,
+    on_event=None,
+    asr_model_dir=None,
+    visual_only=False,
+    overwrite_output=False,
+):
+    """运行视觉流和可选的严格 ASR。
+
+    默认要求真实 ASR 可用。只有显式 visual_only=True 时才跳过 ASR；该模式
+    不生成 aligned_output.json，也不会伪造字幕。
     """
-    实时流式主流程：画面链前台逐帧 + 声音链后台并行。
-
-    参数:
-      on_event: 可选回调 on_event(frame_idx, timestamp, events)。
-                每帧的画面事件会立即回调，宿主在这里消费，无需等整段。
-
-    返回: (pipe, aligned, asr_segments)
-    """
+    video_path = os.path.abspath(video_path)
     if output_dir is None:
-        output_dir = os.path.dirname(video_path) or '.'
+        output_dir = os.path.join(os.path.dirname(video_path) or ".", "video-understanding-output")
+    output_dir = os.path.abspath(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    if not overwrite_output and any(os.scandir(output_dir)):
+        raise FileExistsError(
+            f"输出目录不是空目录: {output_dir}；请使用新目录或显式启用 overwrite_output"
+        )
 
-    print(f"[Pipeline] 视频: {video_path}")
-    print(f"[Pipeline] 输出: {output_dir}")
-
-    pipe = SmartPipeline(config)
-    consumer = StreamingConsumer()
-
-    # === 通道1+2: 画面链（实时前台）===
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"[Pipeline] 无法打开视频: {video_path}")
-        return None, [], []
+        raise ValueError(f"无法打开视频: {video_path}")
 
-    fps = cap.get(cv2.CAP_PROP_FPS)
+    fps = float(cap.get(cv2.CAP_PROP_FPS))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    duration = total_frames / fps if fps > 0 else 0
-    print(f"[Pipeline] 视频: {w}x{h} @ {fps:.1f}fps, {total_frames}帧, {duration:.1f}s")
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if fps <= 0:
+        cap.release()
+        raise ValueError("视频 FPS 无效；固定帧率时间轴无法建立")
+    duration = total_frames / fps if total_frames > 0 else None
 
-    keyframes_dir = os.path.join(output_dir, 'keyframes')
+    pipe = SmartPipeline(config)
+    consumer = StreamingConsumer(history_limit=pipe.event_history_limit)
+    keyframes_dir = os.path.join(output_dir, "keyframes")
     if save_keyframes:
         os.makedirs(keyframes_dir, exist_ok=True)
 
-    # === 通道3: 声音链（后台并行）===
-    wav_path = extract_audio(video_path, sr=16000)
     asr_segments = []
+    asr_state = {"status": "disabled" if visual_only else "pending", "error": None}
     asr_thread = None
-    if wav_path and os.path.exists(wav_path):
-        asr_thread = threading.Thread(target=_asr_job,
-                                      args=(video_path, wav_path, asr_segments),
-                                      daemon=True)
+    model_info = None
+    manifest_path = os.path.join(output_dir, "run_manifest.json")
+    manifest = {
+        "schema_version": 1,
+        "status": "running",
+        "mode": "visual-only" if visual_only else "visual+asr",
+        "input": {
+            "path": video_path,
+            "width": width,
+            "height": height,
+            "fps": fps,
+            "total_frames": total_frames,
+            "duration_s": duration,
+        },
+        "asr": {"status": asr_state["status"], "model": None},
+    }
+    _write_json(manifest_path, manifest)
+
+    if not visual_only:
+        try:
+            require_ffmpeg()
+            recognizer, model_info = load_streaming_recognizer(asr_model_dir, return_info=True)
+        except ASRError as exc:
+            cap.release()
+            asr_state["status"] = "failed"
+            asr_state["error"] = f"{type(exc).__name__}: {exc}"
+            manifest["status"] = "failed"
+            manifest["asr"] = {**asr_state, "model": None}
+            _write_json(manifest_path, manifest)
+            raise
+        asr_state["status"] = "running"
+        asr_thread = threading.Thread(
+            target=_asr_job,
+            args=(video_path, recognizer, asr_segments, asr_state),
+            daemon=False,
+            name="video-understanding-asr",
+        )
         asr_thread.start()
+        manifest["asr"] = {"status": asr_state["status"], "model": model_info}
+        _write_json(manifest_path, manifest)
 
-    frame_idx = 0
-    t_pipeline_start = time.time()
-    kf_count = 0
+    frame_index = 0
+    keyframe_count = 0
+    started = time.perf_counter()
+    events_path = os.path.join(output_dir, "events.jsonl")
 
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
+    visual_error = None
+    try:
+        with open(events_path, "w", encoding="utf-8") as event_log:
+            while True:
+                ok, frame = cap.read()
+                if not ok:
+                    break
 
-        timestamp = frame_idx / fps if fps > 0 else frame_idx * 0.02
+                timestamp = frame_index / fps
+                frame_events = pipe.process_frame(frame, timestamp, fps=fps)
 
-        # 画面链：逐帧处理，返回本帧流式事件
-        frame_events = pipe.process_frame(frame, timestamp)
+                if save_keyframes:
+                    for event in frame_events:
+                        if event["type"] != "keyframe":
+                            continue
+                        filename = f"kf_{keyframe_count:04d}_t{timestamp:.3f}s.jpg"
+                        absolute_path = os.path.join(keyframes_dir, filename)
+                        if not cv2.imwrite(absolute_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 90]):
+                            raise OSError(f"关键帧写入失败: {absolute_path}")
+                        relative_path = os.path.relpath(absolute_path, output_dir).replace("\\", "/")
+                        _attach_keyframe_file(pipe, event, relative_path)
+                        keyframe_count += 1
 
-        # 立即交给宿主消费（流式增量）
-        for ev in frame_events:
-            consumer.consume(ev)
-        if on_event is not None and frame_events:
-            on_event(frame_idx, timestamp, frame_events)
+                for event in frame_events:
+                    consumer.consume(event)
+                    event_log.write(json.dumps(event, ensure_ascii=False) + "\n")
+                if on_event is not None and frame_events:
+                    on_event(frame_index, timestamp, frame_events)
 
-        # 保存关键帧（若本帧产生关键帧）
-        if save_keyframes and frame_events:
-            for ev in frame_events:
-                if ev["type"] == "keyframe":
-                    kf_path = os.path.join(keyframes_dir,
-                                           f"kf_{kf_count:04d}_t{timestamp:.1f}s.jpg")
-                    cv2.imwrite(kf_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
-                    kf_count += 1
+                frame_index += 1
+                if total_frames > 0 and frame_index % 500 == 0:
+                    elapsed = time.perf_counter() - started
+                    processing_fps = frame_index / elapsed if elapsed > 0 else 0
+                    print(
+                        f"[Pipeline] {frame_index}/{total_frames} "
+                        f"({frame_index / total_frames * 100:.1f}%) {processing_fps:.1f} fps"
+                    )
 
-        frame_idx += 1
-        if frame_idx % 500 == 0:
-            elapsed = time.time() - t_pipeline_start
-            proc_fps = frame_idx / elapsed if elapsed > 0 else 0
-            gating = "REALTIME" if proc_fps >= fps else "SLOW"
-            print(f"  [进度] {frame_idx}/{total_frames} ({frame_idx/total_frames*100:.1f}%) "
-                  f"{proc_fps:.1f}fps [{gating}]")
+            final_timestamp = frame_index / fps
+            final_events = pipe.finalize(final_timestamp)
+            for event in final_events:
+                consumer.consume(event)
+                event_log.write(json.dumps(event, ensure_ascii=False) + "\n")
+            if on_event is not None and final_events:
+                on_event(frame_index, final_timestamp, final_events)
+    except Exception as exc:
+        visual_error = exc
+    finally:
+        cap.release()
 
-    cap.release()
-    pipeline_time = time.time() - t_pipeline_start
-    proc_fps = frame_idx / pipeline_time if pipeline_time > 0 else 0
+    if visual_error is not None:
+        if asr_thread is not None:
+            asr_thread.join()
+        manifest["status"] = "failed"
+        manifest["error"] = f"{type(visual_error).__name__}: {visual_error}"
+        manifest["asr"] = {**asr_state, "model": model_info}
+        _write_json(manifest_path, manifest)
+        raise visual_error
 
-    # 等待后台声音链完成
+    elapsed = time.perf_counter() - started
+    processing_fps = frame_index / elapsed if elapsed > 0 else 0.0
+    pipe.save_results(os.path.join(output_dir, "pipeline_results.json"))
+
     if asr_thread is not None:
         asr_thread.join()
+        if asr_state["status"] != "succeeded":
+            manifest["status"] = "failed"
+            manifest["asr"] = {**asr_state, "model": model_info}
+            manifest["visual_processing"] = {
+                "frames": frame_index,
+                "elapsed_s": round(elapsed, 3),
+                "processing_fps": round(processing_fps, 2),
+            }
+            _write_json(manifest_path, manifest)
+            raise ASRRuntimeError(asr_state["error"] or "ASR 未成功完成")
 
-    print(f"\n[Pipeline] 画面链完成: {frame_idx}帧, 耗时{pipeline_time:.1f}s, {proc_fps:.1f}fps")
-    print(f"[Pipeline] 声音链完成: {len(asr_segments)}段")
+    video_end = frame_index / fps
+    aligned = []
+    if not visual_only:
+        aligned = pipe.align_asr_streaming(asr_segments, video_end=video_end)
+        _write_json(
+            os.path.join(output_dir, "aligned_output.json"),
+            {
+                "schema_version": 1,
+                "asr_status": "succeeded",
+                "asr_model": model_info,
+                "aligned_segments": aligned,
+                "asr_segments": asr_segments,
+                "pipeline_summary": pipe.get_summary(),
+                "event_log": "events.jsonl",
+            },
+        )
 
-    # === 时间轴对齐融合 ===
-    print("[Pipeline] 时间轴对齐融合...")
-    aligned = pipe.align_asr_streaming(asr_segments) if asr_segments else []
-
-    # === 保存结果 ===
-    results = pipe.save_results(os.path.join(output_dir, 'pipeline_results.json'))
-    with open(os.path.join(output_dir, 'aligned_output.json'), 'w', encoding='utf-8') as f:
-        json.dump({
-            "live": True,
-            "aligned_segments": aligned,
-            "asr_segments": asr_segments,
-            "pipeline_summary": pipe.get_summary(),
-            "stream_event_count": consumer.snapshot()["event_count"]
-        }, f, ensure_ascii=False, indent=2)
-
-    summary = pipe.get_summary()
-    print(f"\n{'='*60}")
-    print(f"实时流式整合管线 - 完成")
-    print(f"{'='*60}")
-    print(f"  视频规格:       {w}x{h} @ {fps:.1f}fps")
-    print(f"  画面链处理速率: {proc_fps:.1f}fps  {'✓ 实时达标' if proc_fps >= fps else '✗ 未达标'}")
-    print(f"  运动事件:       {summary['motion_events']}")
-    print(f"  运动段:         {summary['motion_segments']}")
-    print(f"  关键帧:         {summary['keyframes']}")
-    print(f"  ASR段:          {len(asr_segments)}")
-    print(f"  对齐段:         {len(aligned)}")
-    print(f"  画面链耗时:     {pipeline_time:.1f}s")
-    print(f"{'='*60}")
+    manifest["status"] = "succeeded"
+    manifest["asr"] = {"status": asr_state["status"], "model": model_info}
+    manifest["visual_processing"] = {
+        "frames": frame_index,
+        "elapsed_s": round(elapsed, 3),
+        "processing_fps": round(processing_fps, 2),
+        "summary": pipe.get_summary(),
+        "event_log": "events.jsonl",
+    }
+    _write_json(manifest_path, manifest)
 
     return pipe, aligned, asr_segments
 
 
-def run_pipeline(video_path, output_dir=None, save_keyframes=True, config=None):
-    """兼容旧调用：等价于实时流式流程。"""
-    return run_realtime_pipeline(video_path, output_dir, save_keyframes, config)
+def run_pipeline(video_path, output_dir=None, save_keyframes=True, config=None, **kwargs):
+    return run_realtime_pipeline(video_path, output_dir, save_keyframes, config, **kwargs)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='实时流式三通道视频理解管线')
-    parser.add_argument('--video', required=True, help='视频文件路径')
-    parser.add_argument('--output', default=None, help='输出目录')
-    parser.add_argument('--no-keyframes', action='store_true', help='不保存关键帧图片')
-    parser.add_argument('--fast-scale', type=float, default=0.25, help='快系统降采样比例')
-    parser.add_argument('--kf-hz', type=float, default=1.5, help='慢系统关键帧频率(Hz)')
+    parser = argparse.ArgumentParser(description="视频视觉事件与严格 ASR 管线")
+    parser.add_argument("--video", required=True, help="视频文件路径")
+    parser.add_argument("--output", default=None, help="输出目录")
+    parser.add_argument("--visual-only", action="store_true", help="显式跳过 ASR；不会生成模拟字幕")
+    parser.add_argument("--asr-model-dir", default=None, help="sherpa-onnx 模型目录")
+    parser.add_argument("--no-keyframes", action="store_true", help="不保存关键帧图片")
+    parser.add_argument("--fast-scale", type=float, default=0.25, help="快系统降采样比例 (0,1]")
+    parser.add_argument("--kf-hz", type=float, default=1.5, help="慢系统最大检查频率 Hz")
+    parser.add_argument("--event-history-limit", type=int, default=2000, help="内存中保留的最近事件数")
+    parser.add_argument("--overwrite-output", action="store_true", help="允许复用非空输出目录")
     args = parser.parse_args()
 
-    config = {"fast_scale": args.fast_scale, "keyframe_interval_hz": args.kf_hz}
-    run_realtime_pipeline(
-        video_path=args.video,
-        output_dir=args.output,
-        save_keyframes=not args.no_keyframes,
-        config=config
-    )
+    config = {
+        "fast_scale": args.fast_scale,
+        "keyframe_interval_hz": args.kf_hz,
+        "event_history_limit": args.event_history_limit,
+    }
+    try:
+        run_realtime_pipeline(
+            video_path=args.video,
+            output_dir=args.output,
+            save_keyframes=not args.no_keyframes,
+            config=config,
+            asr_model_dir=args.asr_model_dir,
+            visual_only=args.visual_only,
+            overwrite_output=args.overwrite_output,
+        )
+    except ASRError as exc:
+        parser.exit(2, f"ASR 失败: {exc}\n")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

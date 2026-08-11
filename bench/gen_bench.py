@@ -1,8 +1,19 @@
-import cv2, numpy as np, os
+import argparse
+import os
+
+import cv2
+import numpy as np
+
+
+def video_writer(path, w, h, fps):
+    writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+    if not writer.isOpened():
+        raise RuntimeError(f"无法创建测试视频（mp4v 编码器不可用）: {path}")
+    return writer
 
 def gen_aba(path, w=640, h=360, fps=30, dur=12):
-    vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-    n = fps * dur
+    vw = video_writer(path, w, h, fps)
+    n = int(fps * dur)
     for i in range(n):
         t = i / fps
         frame = np.zeros((h, w, 3), dtype=np.uint8)
@@ -16,8 +27,8 @@ def gen_aba(path, w=640, h=360, fps=30, dur=12):
     vw.release()
 
 def gen_slow(path, w=640, h=360, fps=30, dur=12):
-    vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-    n = fps * dur
+    vw = video_writer(path, w, h, fps)
+    n = int(fps * dur)
     for i in range(n):
         t = i / fps
         frame = np.zeros((h, w, 3), dtype=np.uint8)
@@ -29,27 +40,27 @@ def gen_slow(path, w=640, h=360, fps=30, dur=12):
     vw.release()
 
 def gen_hue(path, w=640, h=360, fps=30, dur=12):
-    vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-    n = fps * dur
-    # 预计算 360 个色相当下的 BGR
-    hsv = np.zeros((360, 1, 3), dtype=np.uint8)
-    hsv[:, 0, 0] = np.arange(360, dtype=np.uint8)
+    vw = video_writer(path, w, h, fps)
+    n = int(fps * dur)
+    # OpenCV 8-bit HSV 的 H 范围是 0-179。
+    hsv = np.zeros((180, 1, 3), dtype=np.uint8)
+    hsv[:, 0, 0] = np.arange(180, dtype=np.uint8)
     hsv[:, 0, 1] = 200
     hsv[:, 0, 2] = 100
-    bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR).reshape(360, 3).astype(np.uint8)
+    bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR).reshape(180, 3).astype(np.uint8)
     x_idx = np.arange(w)
     for i in range(n):
         t = i / fps
-        phase = t / dur * 360
-        hue_idx = ((phase + x_idx * 0.3) % 360).astype(np.int32)
+        phase = t / dur * 180
+        hue_idx = ((phase + x_idx * 0.15) % 180).astype(np.int32)
         colors = bgr[hue_idx]  # (w,3)
         frame = np.repeat(colors[np.newaxis, :, :], h, axis=0)
         vw.write(frame)
     vw.release()
 
 def gen_static(path, w=640, h=360, fps=30, dur=12):
-    vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-    n = fps * dur
+    vw = video_writer(path, w, h, fps)
+    n = int(fps * dur)
     for i in range(n):
         t = i / fps
         frame = np.zeros((h, w, 3), dtype=np.uint8)
@@ -60,8 +71,19 @@ def gen_static(path, w=640, h=360, fps=30, dur=12):
         vw.write(frame)
     vw.release()
 
-for name, fn in [('aba', gen_aba), ('slow', gen_slow), ('hue', gen_hue), ('static', gen_static)]:
-    p = f'/data/user/work/bench/{name}.mp4'
-    fn(p)
-    print(f'{name}: {os.path.getsize(p)} bytes')
-print('测试视频生成完毕')
+def main():
+    parser = argparse.ArgumentParser(description="生成可复现的合成视频基准集")
+    parser.add_argument("--output", default=os.path.dirname(os.path.abspath(__file__)))
+    args = parser.parse_args()
+    output = os.path.abspath(args.output)
+    os.makedirs(output, exist_ok=True)
+
+    for name, fn in [('aba', gen_aba), ('slow', gen_slow), ('hue', gen_hue), ('static', gen_static)]:
+        path = os.path.join(output, f'{name}.mp4')
+        fn(path)
+        print(f'{name}: {os.path.getsize(path)} bytes')
+    print(f'测试视频生成完毕: {output}')
+
+
+if __name__ == '__main__':
+    main()
