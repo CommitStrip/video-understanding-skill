@@ -5,9 +5,11 @@
 
 用法:
     from vus import SmartPipeline, run_realtime_pipeline, select_representatives
+    from vus import FileSource, CameraSource, RTSPSource  # W2 实时源
 
     # 模块方式运行
     python -m vus.integrated_pipeline --video x.mp4 --output out/
+    python -m vus.integrated_pipeline --source rtsp --url rtsp://host/stream
 """
 
 __version__ = "0.1.0"
@@ -15,10 +17,15 @@ __version__ = "0.1.0"
 from .smart_pipeline import SmartPipeline
 from .integrated_pipeline import run_realtime_pipeline
 from .select_representatives import select_representatives
+from .source import FrameSource, FileSource, CameraSource, RTSPSource
 
 __all__ = [
     "__version__",
     "SmartPipeline",
     "run_realtime_pipeline",
     "select_representatives",
+    "FrameSource",
+    "FileSource",
+    "CameraSource",
+    "RTSPSource",
 ]
