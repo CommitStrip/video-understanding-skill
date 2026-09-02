@@ -53,7 +53,9 @@ tests/                           pytest 单测与端到端冒烟
 > `devices.*` 包方式导入，二者复用同一套快慢双路径架构
 > （`SmartSurveillancePipeline` 继承自 `SmartPipeline`）。`scripts/` 保留全部旧
 > 命令入口（薄壳）。模型与产物配置：ASR 模型目录可用环境变量
-> `VUS_SHERPA_MODELS` 指定。
+> `VUS_SHERPA_MODELS` 指定；CLIP 权重目录可用 `VUS_CLIP_MODELS` 指定（权重经
+> `scripts/download_clip_onnx.sh` 下载，不入库）。低配环境下若遇 OpenBLAS
+> "Memory allocation" 报错，设 `OPENBLAS_NUM_THREADS=1` 规避。
 
 ## 核心价值
 

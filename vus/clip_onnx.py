@@ -175,6 +175,10 @@ class ClipOnnx:
             vec = vec / norm
         return vec
 
+    def cosine_dist(self, a, b):
+        """实例方法别名，见模块级 cosine_dist。"""
+        return cosine_dist(a, b)
+
 
 def cosine_dist(a, b):
     """余弦距离 1 - cos(a,b)（0-1，越大越不相似）。零向量定义为距离 0。"""

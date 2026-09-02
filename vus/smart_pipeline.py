@@ -51,6 +51,10 @@ class SmartPipeline:
         self.phash_threshold = cfg.get('phash_threshold', 12)              # pHash 距离阈值
         self.hist_threshold = cfg.get('hist_threshold', 0.5)               # 直方图相关阈值
         self.dedup_threshold = cfg.get('dedup_threshold', 5)               # 去重 hamming 距离
+        # 渐变漂移采纳：第一闸(像素差分)连续 N 次超阈即发帧，治"渐变演化失明"
+        # （直播课程/讲座的课件批注推进：像素差分看得见，pHash/直方图看不见）。
+        # 0 = 关闭，还原纯双闸旧行为
+        self.drift_confirm_checks = cfg.get('drift_confirm_checks', 3)
 
         # === 快系统状态 ===
         self.prev_small = None
@@ -67,6 +71,7 @@ class SmartPipeline:
         self.prev_hist = None
         self.kf_hashes = []
         self.last_keyframe_t = -1.0
+        self._drift_streak = 0          # 第一闸连续超阈计数（渐变漂移采纳用）
 
         # === 输出（流式累积）===
         # max_events: 事件内存上限（长视频/长直播防泄漏，W1 修复：原 list 无限增长，
@@ -252,7 +257,9 @@ class SmartPipeline:
 
         diff = cv2.absdiff(self.prev_kf_gray, gray)
         score = float(np.mean(diff))
-        if score <= self.keyframe_diff:
+        drifting = score > self.keyframe_diff
+        self._drift_streak = self._drift_streak + 1 if drifting else 0
+        if not drifting:
             return None
 
         phash = self._compute_phash(gray)
@@ -269,27 +276,43 @@ class SmartPipeline:
                 is_duplicate = True
                 break
 
+        # 采纳条件：突变场景（pHash/直方图证据）立即采纳，仍查 pHash 去重；
+        # 渐变漂移（pHash/直方图不可见但像素差分持续超阈）累计 N 次检查后采纳。
+        # 漂移路径不查 pHash 去重——pHash 对该类内容失明（距离恒 0-7），
+        # 用它否决等于复刻本 bug；score 本身就是对上一采纳帧的像素级新颖性证明，
+        # 且 3 连检要求把发帧率天然限制在 ≤1 帧/6 秒
+        by_drift = (not is_new_scene
+                    and self.drift_confirm_checks > 0
+                    and self._drift_streak >= self.drift_confirm_checks)
         if is_new_scene and not is_duplicate:
-            self.prev_kf_gray = gray.copy()
-            self.prev_phash = phash
-            self.prev_hist = hist
-            self.kf_hashes.append(phash)
-            self.last_keyframe_t = timestamp
-            self.keyframes.append({
-                "t": round(timestamp, 3),
-                "frame_idx": self.frame_count,
-                "score": round(score, 2),
-                "phash_dist": int(phash_dist),
-                "hist_corr": round(hist_corr, 3)
-            })
-            return {
-                "type": "keyframe",
-                "t": round(timestamp, 3),
-                "score": round(score, 2),
-                "phash_dist": int(phash_dist),
-                "hist_corr": round(hist_corr, 3)
-            }
-        return None
+            self._drift_streak = 0
+            reason = "scene_change"
+        elif by_drift:
+            self._drift_streak = 0
+            reason = "gradual_drift"
+        else:
+            return None
+        self.prev_kf_gray = gray.copy()
+        self.prev_phash = phash
+        self.prev_hist = hist
+        self.kf_hashes.append(phash)
+        self.last_keyframe_t = timestamp
+        self.keyframes.append({
+            "t": round(timestamp, 3),
+            "frame_idx": self.frame_count,
+            "reason": reason,
+            "score": round(score, 2),
+            "phash_dist": int(phash_dist),
+            "hist_corr": round(hist_corr, 3)
+        })
+        return {
+            "type": "keyframe",
+            "t": round(timestamp, 3),
+            "reason": reason,
+            "score": round(score, 2),
+            "phash_dist": int(phash_dist),
+            "hist_corr": round(hist_corr, 3)
+        }
 
     # ==================== 特征计算 ====================
 

@@ -29,3 +29,39 @@ commit + push + 打 tag，自动进入下一波；agent 不可用时主会话直
 | W4 目录内分层 | `vus/`（核心）+ `apps/anti_drone/`（检测栈）+ `devices/`（定位/云台/协同） | pytest 全绿 + CLI 冒烟 + SKILL.md 工作流可用 | [x] 完成于 2026-09-02 |
 
 交付物：每波一个 tag（wave-0 … wave-4）+ 最终 `v0.2.0`。
+
+## 实战发现（2026-09-02，120 分钟直播课程视频首测）
+
+v0.2.0 发布后用真实视频（1080p25 · 120.2min · 180,311 帧）实战验证，性能全部达标
+（142.8fps = 5.7× 实时、内存稳定 ~225MB），但暴露一个结构性缺陷与若干环境注意项：
+
+### BUG-1（已修复于 v0.2.1）：慢系统双闸对"渐变演化"内容失明
+
+- **现象**：2 小时课程仅产出 3 个关键帧（t=0/1.5/133.8s），其后 118 分钟画面持续
+  渐变演化（课件批注推进）却零发帧
+- **根因**：`SmartPipeline._slow_keyframe` 的第二道闸 `is_new_scene`（pHash>12 或
+  直方图相关<0.5）对渐变漂移系统性失明——实测漂移点 pHash 距离仅 4-7/64、
+  直方图相关 1.00，第一道闸（像素差分 14.3>10）明明已通过却被一票否决。
+  双闸为"突变切镜"降噪的设计，把"缓慢累积的内容演化"（直播课程最典型形态）也吞掉了
+- **修复**：新增"持续漂移采纳"——第一闸连续 `drift_confirm_checks`（默认 3，
+  约 6 秒）超阈值即采纳为关键帧（reason=gradual_drift）；pHash/直方图退回
+  突变场景的快速通道而非一票否决。设 0 可还原旧行为
+- **CLIP 旁证（实测数据）**：CLIP 语义距离能看见该渐变（漂移点 0.070-0.085 vs
+  同内容≈0，达真实切换 0.144 的一半），验证了"CLIP 模式"可行；但 370ms/帧
+  不宜进实时检查路径，作为 Tier3 离线语义层（已接入）更合适。若在 Tier2 用
+  CLIP 确认，仅在第一闸已过的稀疏候选上懒加载运行
+
+### 环境注意项（低配 Windows 实测）
+
+- **OpenBLAS 多线程内存分配失败**：2 核机器上 opencv+numpy 混跑可能报
+  "Memory allocation still failed after 10 retries"，`OPENBLAS_NUM_THREADS=1` 规避
+- **cv2.VideoCapture seek 规律**：同一实例"顺序 read 后再 POS_MSEC seek"可能失败，
+  每个时间点新开实例 seek 可靠；FileSource 顺序读不受影响
+- **ffmpeg 中文路径**：Windows 控制台下 ffmpeg 读中文路径报" No such file"，
+  需经 Python subprocess 传参或改 ASCII 路径
+
+### 待办（下轮候选）
+
+- [ ] Tier3 CLIP 语义去重与漂移视频的语义评估实测（PROTOCOL 已就绪）
+- [ ] sherpa-onnx 真实字幕链路实测（本机未装，直播课程是理想素材）
+- [ ] `apps/anti_drone/models/` 4 个旧权重（~96MB）的 LFS 迁移或下载脚本化（需重写历史，独立决策）
