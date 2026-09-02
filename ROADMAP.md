@@ -26,6 +26,6 @@ commit + push + 打 tag，自动进入下一波；agent 不可用时主会话直
 | W1 核心算法升级 | Tier3 桶内多样性 top-k（最远点采样，默认 k=1 兼容）+ 自适应桶宽；events 有界 deque；ASR 真词级时间戳；删空桩 | 合成关键帧上 k=3 多样性生效；长列表内存测试通过 | [x] 完成于 2026-09-02 |
 | W2 实时源 | `vus/source.py`：File/Camera/RTSP 统一接口、断流重连、背压取最新帧、单调时钟时间戳；CLI `--source`；Ctrl-C 优雅落盘 | 限速回放下丢帧统计正确；事件时间轴单调 | [x] 完成于 2026-09-02 |
 | W3 语义增强与评估 | CLIP ONNX 化（去 torch）；OCR 第三通道（默认关）；`bench/semantic_eval/` 标注协议 + 语义覆盖率/冗余度指标；修正 crv 对比报告 | 新评估报告落库；CLIP ONNX 路径跑通 | [x] 完成于 2026-09-02 |
-| W4 目录内分层 | `vus/`（核心）+ `apps/anti_drone/`（检测栈）+ `devices/`（定位/云台/协同） | pytest 全绿 + CLI 冒烟 + SKILL.md 工作流可用 | [ ] |
+| W4 目录内分层 | `vus/`（核心）+ `apps/anti_drone/`（检测栈）+ `devices/`（定位/云台/协同） | pytest 全绿 + CLI 冒烟 + SKILL.md 工作流可用 | [x] 完成于 2026-09-02 |
 
 交付物：每波一个 tag（wave-0 … wave-4）+ 最终 `v0.2.0`。

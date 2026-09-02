@@ -7,38 +7,52 @@
 ## 安装
 
 ```bash
-pip install -e .            # 核心管线（opencv + numpy）
+pip install -e .            # 核心管线 v0.2.0（opencv + numpy）
 pip install -e ".[asr]"     # 可选：sherpa-onnx 流式 ASR
 ```
 
-两种等价运行方式（`vus` 已是可安装包）：
+两种等价运行方式（`vus` 已是可安装包，当前版本 **0.2.0**）：
 
 ```bash
 python -m vus.integrated_pipeline --video 视频.mp4 --output out/   # 推荐
 python scripts/integrated_pipeline.py --video 视频.mp4 --output out/  # 兼容入口
 ```
 
-## 仓库结构（三层）
+## 仓库结构（v0.2 分层）
 
 ```
-vus/（安装包，视频理解核心）
+vus/（可安装核心包 · 域无关的视频理解）
     smart_pipeline.py            实时预算分配 · 画面链（快/慢双系统）
     integrated_pipeline.py       三通道流式编排（画面 + 声音 + 对齐）
     asr_sherpa.py                流式 ASR 声音链（sherpa-onnx / mock fallback）
     select_representatives.py    Tier3 语义代表帧选择（内容理解层）
+    source.py                    实时源抽象（文件/相机/RTSP，背压 + 重连）
+    clip_onnx.py / ocr_channel.py  CLIP 语义增强（ONNX）+ OCR 第三通道
     validate_realtime.py         实时率验证（720p50 / 1080p30）
-    detection_range.py           检测距离估算（针孔模型）
-scripts/（随仓库附带的反无人机应用栈，W4 将迁移分层）
+    io_utils.py / pathsafe.py    安全落盘与路径收敛
+apps/anti_drone/（反无人机应用栈 · 建立在核心之上）
     detection_pipeline.py        触发式目标检测中系统层
-    localization.py / gis_ptz.py / onvif_ptz.py / slew_confirm.py /
-    multi_cam_handover.py        设备控制层：单目定位 / GIS / 云台 / 多机协同
-bench/                          与 claude-real-video 的对比基准 + 性能报告
-tests/                          pytest 单测与端到端冒烟
+    detection_range.py           检测距离估算（针孔模型）
+    models/                      YOLO 检测模型（*.pt / *.onnx）
+    bench/                       Phase II 逐模块性能实测（bench_phase2.py 等）
+    reports/                     实机测试与判别基准报告（HTML / 视频）
+devices/（设备控制层）
+    localization.py              单目定位（地面测距 / 方位角）
+    gis_ptz.py                   GIS 导出 + PTZ 瞄准联动（slew-to-cue）
+    onvif_ptz.py                 ONVIF PTZ 协议下发
+    slew_confirm.py              转向-确认闭环
+    multi_cam_handover.py        多站相机目标交接
+    *_config.example.json        相机 / 云台 / ONVIF 配置样例
+scripts/                         兼容入口：薄壳 re-export，旧命令全部不变
+bench/                           视频理解对比基准（crv 对比 + semantic_eval）
+tests/                           pytest 单测与端到端冒烟
 ```
 
-> `vus/` 是域无关的理解核心；`scripts/` 里的反无人机检测栈与设备控制层是
-> 建立在核心之上的衍生应用，二者复用同一套快慢双路径架构（`SmartSurveillancePipeline`
-> 继承自 `SmartPipeline`）。模型与产物配置：ASR 模型目录可用环境变量
+> `vus/` 是域无关的理解核心；`apps/anti_drone/` 与 `devices/` 是建立在核心之上的
+> 衍生应用与设备控制层，不进 wheel，经仓库根 sys.path 以 `apps.anti_drone.*` /
+> `devices.*` 包方式导入，二者复用同一套快慢双路径架构
+> （`SmartSurveillancePipeline` 继承自 `SmartPipeline`）。`scripts/` 保留全部旧
+> 命令入口（薄壳）。模型与产物配置：ASR 模型目录可用环境变量
 > `VUS_SHERPA_MODELS` 指定。
 
 ## 核心价值
@@ -79,20 +93,14 @@ python scripts/select_representatives.py --keyframes out/keyframes \
 
 ```
 video-understanding-skill/
-├── SKILL.md                        # Skill 定义（含完整工作流指引）
-├── README.md
-├── LICENSE
-├── requirements.txt
-└── scripts/
-    ├── smart_pipeline.py           # 实时预算分配 · 画面链（快/慢双系统）
-    ├── integrated_pipeline.py      # 三通道流式编排（画面+声音+对齐）
-    ├── asr_sherpa.py               # 流式 ASR 声音链（sherpa-onnx / fallback）
-    ├── select_representatives.py   # Tier3 语义代表帧选择（内容理解层）
-    └── validate_realtime.py        # 实时率验证（720p50 / 1080p30）
-└── bench/                          # 对比基准（与 claude-real-video 落地实测）
-    ├── gen_bench.py                # 生成 4 组可控测试视频
-    ├── run_bench.py                # 跑双方管线
-    └── land_compare.py             # 输出速度/准确性对比表
+├── vus/                  # 可安装核心包（画面链/ASR/代表帧/实时源/CLIP/OCR）
+├── apps/anti_drone/      # 反无人机应用栈（检测管线/模型/性能基准/报告）
+├── devices/              # 设备控制层（定位/GIS/云台/ONVIF/多机协同）
+├── scripts/              # 兼容入口薄壳（旧命令全部不变）
+├── bench/                # 视频理解对比基准（crv 对比 + semantic_eval 语义评估）
+├── tests/                # pytest 单测与端到端冒烟
+├── SKILL.md              # Skill 定义（含完整工作流指引）
+└── README.md / LICENSE / requirements.txt / pyproject.toml
 ```
 
 ## 三层压缩理念
