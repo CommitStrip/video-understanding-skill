@@ -31,3 +31,7 @@ Thumbs.db
 .mimosa/
 vus.egg-info/
 *.egg-info/
+
+# W3: semantic_eval 产物（合成实验输出与标注脚手架）
+bench/semantic_eval/out_*/
+bench/semantic_eval/annotations/

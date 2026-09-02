@@ -18,6 +18,10 @@ dependencies = [
 
 [project.optional-dependencies]
 asr = ["sherpa-onnx>=1.10"]
+# W3: CLIP 语义增强默认走 ONNX 引擎（无 torch）；旧 torch 路径用 --clip-torch
+clip = ["onnxruntime>=1.16"]
+# W3: OCR 第三通道（integrated_pipeline --ocr，默认关）
+ocr = ["rapidocr-onnxruntime>=1.3"]
 
 [tool.setuptools]
 # 显式列出包，避免自动发现把 scripts/、bench/ 等应用层脚本打进 wheel

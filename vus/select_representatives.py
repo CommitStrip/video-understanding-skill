@@ -23,7 +23,10 @@ select_representatives.py - 语义代表帧选择（Tier 3 / 内容理解层）
   - 启用 --clip 后，桶内选帧打分 = w_pix*像素差分 + (1-w_pix)*CLIP 语义距离，兼顾视觉与语义。
   - 实测结论（2026-08-10）：CLIP ViT-B/32 单帧 CPU 推理 157.7ms / 1029MB，
     绝不可进逐帧实时路径；仅作为**可选的 Tier3 离线增强**（对桶锚点候选计算）。
-  - 依赖真实 CLIP 权重（openai/clip ViT-B/32），需外网下载；沙箱/离线环境会显式报错而非静默降级。
+  - 依赖真实 CLIP 权重，缺失时显式报错而非静默降级。
+  - W3（2026-09-02）：--clip 默认走 **ONNX 引擎**（onnxruntime CPU，去 torch 依赖，
+    实测单帧 ~32ms；权重用 scripts/download_clip_onnx.sh 一次性下载到 ./models），
+    旧 torch+openai-clip 路径保留为 --clip-torch（默认关，向后兼容）。
 
 W1 核心算法升级（2026-09-02）：
   - 桶内多样性 top-k（--k，默认 1 向后兼容）：k>1 时桶内用最远点采样（FPS），
@@ -110,6 +113,76 @@ def _clip_dist(a, b):
     return 1.0 - float(np.dot(va, vb) / (na * nb))
 
 
+# ==================== W3: CLIP 引擎抽象（ONNX 默认 / torch 兼容） ====================
+#
+# 两个引擎对 select_representatives 暴露同一打分接口（embed + dist），
+# 桶内选帧打分公式不变：w_pix*pixel_diff + (1-w_pix)*语义距离。
+
+class OnnxClipEngine:
+    """默认引擎：onnxruntime CPU 推理（去 torch 依赖），距离用 clip_onnx.cosine_dist。"""
+
+    name = "onnx"
+
+    def __init__(self, model_dir=None):
+        from .clip_onnx import ClipOnnx, cosine_dist
+        self._cosine_dist = cosine_dist
+        self.backend = ClipOnnx(model_dir)   # 缺模型/缺包时显式抛 RuntimeError
+
+    @property
+    def model_path(self):
+        return self.backend.model_path
+
+    def embed(self, img_bgr):
+        return self.backend.embed(img_bgr)
+
+    def dist(self, a, b):
+        return float(self._cosine_dist(a, b))
+
+
+class TorchClipEngine:
+    """旧引擎：torch + openai-clip（--clip-torch 显式启用，向后兼容）。
+
+    也接受已加载的 (preprocess, model, device) 元组（与 W3 前的调用方兼容）。
+    """
+
+    name = "torch"
+
+    def __init__(self, preprocess=None, model=None, device=None):
+        if preprocess is None or model is None:
+            preprocess, model, device = load_clip_model(device)
+        self.preprocess, self.model, self.device = preprocess, model, device
+
+    def embed(self, img_bgr):
+        return _clip_embed(img_bgr, self.preprocess, self.model, self.device)
+
+    def dist(self, a, b):
+        return _clip_dist(a, b)
+
+
+def _as_clip_engine(clip):
+    """把 clip 参数归一为带 embed/dist 的引擎对象。
+
+    接受: OnnxClipEngine / TorchClipEngine 实例，或旧的
+    (preprocess, model, device) 元组（内部包成 TorchClipEngine）。
+    """
+    if clip is None:
+        return None
+    if hasattr(clip, "embed") and hasattr(clip, "dist"):
+        return clip
+    if isinstance(clip, tuple) and len(clip) == 3:
+        return TorchClipEngine(*clip)
+    raise TypeError(f"无法识别的 CLIP 引擎参数: {type(clip)!r}")
+
+
+def load_clip_onnx(model_dir=None):
+    """加载 ONNX CLIP 引擎（--clip 默认路径，无 torch 依赖）。
+
+    模型目录查找顺序: model_dir 参数 > 环境变量 VUS_CLIP_MODELS > ./models。
+    模型缺失 / onnxruntime 缺失时抛 RuntimeError（含下载指引），不静默降级。
+    """
+    return OnnxClipEngine(model_dir)
+
+
 def load_keyframes(kf_dir):
     """扫描 keyframes 目录，返回 [(t, path), ...] 按时间排序。"""
     items = []
@@ -136,8 +209,10 @@ def select_representatives(kf_dir, interval=60.0, dedup_threshold=0.0, clip=None
 
     dedup_threshold 单位：像素差分百分比（0-100）。推荐 8（对应 64x64 下 8% 像素变化）。
 
-    clip: 可选 (preprocess, model, device) 元组（来自 load_clip_model）。为 None 时纯像素差分。
-        启用时，桶内选帧打分 = w_pix*像素差分 + (1-w_pix)*CLIP 语义距离。
+    clip: 可选 CLIP 引擎（OnnxClipEngine / TorchClipEngine，来自 load_clip_onnx /
+        load_clip_model，也兼容旧 (preprocess, model, device) 元组）。
+        为 None 时纯像素差分。启用时，桶内选帧打分 =
+        w_pix*像素差分 + (1-w_pix)*CLIP 语义距离（嵌入与距离按引擎分发）。
     w_pix: 像素差分权重（0-1），默认 0.5，与 CLIP 语义距离各占一半。
 
     k: 每桶保留的代表帧数，默认 1（与旧逻辑完全一致，向后兼容）。
@@ -162,12 +237,14 @@ def select_representatives(kf_dir, interval=60.0, dedup_threshold=0.0, clip=None
     if not kfs:
         return []
 
+    clip = _as_clip_engine(clip)  # 兼容旧元组入参；统一走 embed/dist 引擎接口
+
     def _score(cand, first):
         """桶内候选帧相对首帧的综合差异分。"""
         pix = _pixel_diff(cand['img'], first['img']) / 100.0  # 归一化 0-1
         if clip is None:
             return pix
-        sem = _clip_dist(cand['emb'], first['emb'])  # 0-1
+        sem = clip.dist(cand['emb'], first['emb'])  # 0-1
         return w_pix * pix + (1.0 - w_pix) * sem
 
     def _diversity_dist(cand, sel):
@@ -176,7 +253,7 @@ def select_representatives(kf_dir, interval=60.0, dedup_threshold=0.0, clip=None
         pix = _pixel_diff(cand['img'], sel['img']) / 100.0
         if clip is None:
             return pix
-        sem = _clip_dist(cand['emb'], sel['emb'])
+        sem = clip.dist(cand['emb'], sel['emb'])
         return w_pix * pix + (1.0 - w_pix) * sem
 
     def _pick_bucket(bucket):
@@ -228,7 +305,7 @@ def select_representatives(kf_dir, interval=60.0, dedup_threshold=0.0, clip=None
         img = cv2.imread(p)
         if img is None:
             continue
-        emb = _clip_embed(img, *clip) if clip is not None else None
+        emb = clip.embed(img) if clip is not None else None
         node = {'t': t, 'p': p, 'img': img, 'emb': emb}
         if t >= bucket_start + cur_interval:
             _close_bucket()
@@ -312,7 +389,13 @@ def main():
     ap.add_argument("--dedup-threshold", type=float, default=0.0,
                     help="像素差分去重阈值%%(0-100, 0=关闭,时间完整性优先; 推荐8)")
     ap.add_argument("--clip", action="store_true",
-                    help="启用 CLIP 语义增强(可选,P0)。仅对桶锚点候选计算,离线环境若无权重会显式报错")
+                    help="启用 CLIP 语义增强(可选,P0)。默认走 ONNX 引擎(onnxruntime CPU, "
+                         "无需 torch)；模型缺失时显式报错并给出下载指引")
+    ap.add_argument("--clip-torch", action="store_true",
+                    help="CLIP 语义增强改用旧 torch+openai-clip 引擎(默认关；"
+                         "隐含 --clip，向后兼容)")
+    ap.add_argument("--clip-models-dir", default=None,
+                    help="CLIP ONNX 模型目录(默认: $VUS_CLIP_MODELS > ./models)")
     ap.add_argument("--w-pix", type=float, default=0.5,
                     help="CLIP 混合权重中像素差分的占比(0-1, 默认0.5, 其余为CLIP语义距离)")
     ap.add_argument("--k", type=int, default=1,
@@ -325,17 +408,22 @@ def main():
     ap.add_argument("--report", default=None, help="输出 LLM 上下文 Markdown 路径")
     args = ap.parse_args()
 
-    # 仅当显式 --clip 才加载真实 CLIP 模型；缺依赖/权重时显式报错，不静默降级
+    # 仅当显式启用语义增强才加载 CLIP；缺依赖/权重时显式报错，不静默降级。
+    # 引擎分发: --clip-torch > 旧 torch 引擎；否则 --clip > 默认 ONNX 引擎。
     clip_engine = None
-    if args.clip:
+    if args.clip_torch or args.clip:
         import time
         t0 = time.time()
         try:
-            clip_engine = load_clip_model()
+            if args.clip_torch:
+                clip_engine = TorchClipEngine()
+            else:
+                clip_engine = load_clip_onnx(args.clip_models_dir)
         except RuntimeError as e:
             sys.exit(f"[Select] 错误: {e}")
-        print(f"[Select] CLIP 语义增强已启用 (模型加载 {time.time()-t0:.1f}s, "
-              f"设备 {clip_engine[2]})")
+        extra = f", 模型 {clip_engine.model_path}" if clip_engine.name == "onnx" else ""
+        print(f"[Select] CLIP 语义增强已启用 (引擎 {clip_engine.name}, "
+              f"模型加载 {time.time()-t0:.1f}s{extra})")
 
     info = summarize(args.keyframes)
     print(f"[Select] 管线关键帧: {info['count']} 帧, 跨度 {info['span_s']}s, "

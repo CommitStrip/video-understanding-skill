@@ -123,6 +123,12 @@ video-understanding-skill/
 
 复现（在 `bench/` 目录下）：`python gen_bench.py` 生成 4 组测试视频，`python run_bench.py` 跑双方管线，`python land_compare.py` 输出以上对比表。
 
+### 指标局限（重要）
+
+上表的"覆盖率"是**像素差分定义**的（1s 桶首尾像素差分 >3% 记为有变化秒）——这把尺子与本 Skill 的选帧算法**同构**（都基于像素差分），对比天然偏向自己；对"语义相同但像素不同"的内容（纯色抖动、噪点、热扰）它会伪造大量"变化秒"，对"语义已切换但画面相似"的内容（同机位换话题）则失明。`static` 场景的结论（crv 漏掉末尾突变）不依赖这把尺子、仍然成立；其余场景的速度与精简度结论也独立于覆盖率定义。
+
+W3 起引入**语义级评估**打破该偏差：按语义场景切段做 GT，用"语义覆盖率 / 冗余度 / 场景保真"打分（协议见 [`bench/semantic_eval/PROTOCOL.md`](bench/semantic_eval/PROTOCOL.md)，工具 `eval_semantic.py` / `annotate_vlm.py`）。合成对照实验（`python bench/semantic_eval/gen_synthetic_gt.py`，纯色 A→B→纹路 C→纯色 A'）实证了旧尺子的误判：48s 视频被判出 24 个"有变化秒"（75% 是纯场景内部变化，语义误报），语义上完美的 4 帧选择在该尺子下只得 16.7%，而在语义尺子下满分（覆盖率 100%、冗余度 1.00）。
+
 ## 作为 AI Skill 使用
 
 本目录同时是 [TRAE](https://trae.ai) 兼容的 Skill。将本仓库放入 skills 目录后，AI 会在用户要求"理解这个视频 / 分析视频内容 / 提取视频信息"时自动调用 `SKILL.md` 中的工作流。
