@@ -217,3 +217,94 @@ def test_align_asr_streaming_empty_events():
     assert aligned[0]["linked_motion_events"] == 0
     assert aligned[0]["linked_keyframes"] == 0
     assert aligned[0]["motion_types"] == []
+
+
+# ==================== W1: events 有界化（防长直播内存泄漏） ====================
+
+def _long_moving_frames(n=200):
+    """n 帧持续运动（色块横移、越界回绕），保证几乎每帧都产生运动事件。"""
+    return [make_frame((40 + (i * 8) % 200, 120)) for i in range(n)]
+
+
+def test_max_events_bounded_drops_oldest():
+    """max_events=50 喂 200 帧运动视频：events 不超上限且丢弃计数 > 0。"""
+    pipe = SmartPipeline({"max_events": 50, "fast_scale": 0.25})
+    feed(pipe, _long_moving_frames(200))
+
+    assert len(pipe.events) <= 50
+    summary = pipe.get_summary()
+    assert summary["max_events"] == 50
+    assert summary["events_dropped"] > 0
+    assert summary["events_dropped"] == pipe.events_dropped
+    # 保留的是最新事件：时间戳仍单调不减
+    ts = [e["t"] for e in pipe.events]
+    assert ts == sorted(ts)
+    assert ts[-1] > 0  # 确实丢弃了早期事件，尾部事件时间靠后
+
+
+def test_max_events_zero_keeps_unbounded():
+    """max_events=0 = 无界（旧行为）：事件全保留、丢弃数为 0。"""
+    pipe = SmartPipeline({"max_events": 0, "fast_scale": 0.25})
+    events = feed(pipe, _long_moving_frames(200))
+
+    assert len(pipe.events) == len(events)
+    assert len(events) > 50, "前提检查：200 帧运动视频应产出超过 50 个事件"
+    assert pipe.events_dropped == 0
+    assert pipe.get_summary()["events_dropped"] == 0
+
+
+def test_max_events_default_is_bounded():
+    """安全默认：不配置时也有界（100000），防止长视频 list 无限增长。"""
+    pipe = SmartPipeline()
+    assert pipe.max_events == 100000
+    from collections import deque
+    assert isinstance(pipe.events, deque)
+
+
+def test_streaming_consumer_bounded():
+    """StreamingConsumer 同样有界：超限丢最旧，snapshot 携带丢弃计数。"""
+    from vus.integrated_pipeline import StreamingConsumer
+
+    c = StreamingConsumer(max_events=10)
+    for i in range(25):
+        c.consume({"type": "motion", "t": round(i / FPS, 3)})
+
+    assert len(c.events) == 10
+    assert c.events_dropped == 15
+    snap = c.snapshot()
+    assert snap["event_count"] == 10
+    assert snap["events_dropped"] == 15
+    assert snap["max_events"] == 10
+    # 保留的是最新事件（首条 t=15/30, 末条 t=24/30）
+    assert snap["events"][0]["t"] == pytest.approx(15 / FPS)
+    assert snap["events"][-1]["t"] == pytest.approx(24 / FPS)
+
+
+def test_streaming_consumer_unbounded_and_default():
+    """StreamingConsumer：max_events=0 无界全保留；默认有界 100000。"""
+    from collections import deque
+    from vus.integrated_pipeline import StreamingConsumer
+
+    c0 = StreamingConsumer(max_events=0)
+    assert isinstance(c0.events, list)
+    for i in range(25):
+        c0.consume({"type": "motion", "t": round(i / FPS, 3)})
+    assert c0.snapshot()["event_count"] == 25
+    assert c0.events_dropped == 0
+
+    assert StreamingConsumer().max_events == 100000
+    assert isinstance(StreamingConsumer().events, deque)
+
+
+def test_align_asr_streaming_uses_end_t_for_last_segment():
+    """对齐层可选消费 ASR 段的 end_t：末段无下一段边界时用 end_t 而非 t+2.0。"""
+    pipe = SmartPipeline()
+    aligned = pipe.align_asr_streaming([
+        {"t": 0.0, "text": "a", "end_t": 2.0},
+        {"t": 2.0, "text": "b", "end_t": 2.9},
+    ])
+    assert aligned[0]["end"] == pytest.approx(2.0)   # 仍取下一段起点
+    assert aligned[1]["end"] == pytest.approx(2.9)   # 末段用 end_t
+    # 兼容旧结构：无 end_t 时末段仍回退 t+2.0
+    aligned_legacy = pipe.align_asr_streaming([{"t": 1.0, "text": "x"}])
+    assert aligned_legacy[0]["end"] == pytest.approx(3.0)

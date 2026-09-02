@@ -69,7 +69,13 @@ class SmartPipeline:
         self.last_keyframe_t = -1.0
 
         # === 输出（流式累积）===
-        self.events = []
+        # max_events: 事件内存上限（长视频/长直播防泄漏，W1 修复：原 list 无限增长，
+        # 75 分钟视频可达数十万事件）。超出上限丢弃**最旧**事件，
+        # 丢弃计数见 get_summary()["events_dropped"]。
+        # 0 = 无界（保持旧行为）；安全默认改为有界 100000。
+        self.max_events = int(cfg.get('max_events', 100000))
+        self.events = deque(maxlen=self.max_events) if self.max_events > 0 else []
+        self._events_appended = 0
         self.motion_segments = []
         self.keyframes = []
 
@@ -110,9 +116,10 @@ class SmartPipeline:
             if kf:
                 out_events.append(kf)
 
-        # 流式返回 + 累积到历史（供摘要 / 对齐层使用）
+        # 流式返回 + 累积到历史（供摘要 / 对齐层使用；超过 max_events 自动丢最旧）
         if out_events:
             self.events.extend(out_events)
+            self._events_appended += len(out_events)
 
         self.frame_count += 1
         self.process_times.append(time.time() - t_start)
@@ -308,10 +315,17 @@ class SmartPipeline:
 
     # ==================== 流式对齐层 ====================
 
+    @property
+    def events_dropped(self):
+        """因超过 max_events 而被丢弃的最旧事件数（max_events=0 无界时恒为 0）。"""
+        return self._events_appended - len(self.events)
+
     def align_asr_streaming(self, segments):
         """
         时间轴对齐融合：流式 ASR 增量段 + 画面事件（流式消费友好）
-        输入: [{"t": float, "text": str}, ...]
+        输入: [{"t": float, "text": str, ("end_t": float), ...}]
+              end_t（可选，W1 起 ASR 真词级路径提供）为该段所在 chunk 的末尾时间；
+              最后一段无下一段边界时优先用 end_t，缺失则回退 t+2.0。
         输出: [{"start","end","text","linked_motion_events","linked_keyframes","motion_types"}, ...]
         """
         motion_events = [e for e in self.events if e["type"].startswith("motion")]
@@ -320,7 +334,10 @@ class SmartPipeline:
         aligned = []
         for i, seg in enumerate(segments):
             t0 = seg["t"]
-            t1 = segments[i + 1]["t"] if i + 1 < len(segments) else t0 + 2.0
+            if i + 1 < len(segments):
+                t1 = segments[i + 1]["t"]
+            else:
+                t1 = seg.get("end_t", t0 + 2.0)
             # 左闭右开 [t0, t1)：事件恰好落在段边界时只归后一段，避免重复计数
             linked_motion = [e for e in motion_events if t0 <= e["t"] < t1]
             linked_kf = [k for k in keyframe_events if t0 <= k["t"] < t1]
@@ -345,6 +362,8 @@ class SmartPipeline:
             "motion_segments": len(self.motion_segments),
             "keyframes": len(self.keyframes),
             "total_events": len(self.events),
+            "events_dropped": self.events_dropped,
+            "max_events": self.max_events,
             "avg_process_time_ms": round(avg_process * 1000, 2),
             "avg_fps": round(avg_fps, 1),
             "fast_scale": self.fast_scale,

@@ -21,6 +21,7 @@ import time
 import os
 import argparse
 import threading
+from collections import deque
 
 from .io_utils import write_json
 from .smart_pipeline import SmartPipeline
@@ -34,18 +35,32 @@ class StreamingConsumer:
     """
     流式增量的宿主侧消费者。
     宿主把 process_frame/on_event 产出的每个事件立即喂给它，它实时累积并可由宿主随时读取。
+
+    max_events: 事件内存上限（W1 修复：原 list 无限增长，长直播内存泄漏）。
+                超出上限丢弃最旧事件，丢弃数见 snapshot()["events_dropped"]。
+                0 = 无界（旧行为）；默认 100000，与 SmartPipeline 的 max_events 配置一致。
     """
 
-    def __init__(self):
-        self.events = []          # 全部事件（时间序）
+    DEFAULT_MAX_EVENTS = 100000
+
+    def __init__(self, max_events=DEFAULT_MAX_EVENTS):
+        self.max_events = int(max_events)
+        self.events = deque(maxlen=self.max_events) if self.max_events > 0 else []
+        self._events_appended = 0
         self.motion_segments = []  # 已闭合的运动段
         self.keyframes = []        # 关键帧
         self._lock = threading.Lock()
+
+    @property
+    def events_dropped(self):
+        """因超过 max_events 而被丢弃的最旧事件数（max_events=0 无界时恒为 0）。"""
+        return self._events_appended - len(self.events)
 
     def consume(self, ev):
         """喂入一个事件，立即记录（线程安全）。"""
         with self._lock:
             self.events.append(ev)
+            self._events_appended += 1
             if ev["type"] == "motion_end":
                 self.motion_segments.append({
                     "start": ev.get("segment_start"),
@@ -63,7 +78,9 @@ class StreamingConsumer:
                 "motion_segments": list(self.motion_segments),
                 "keyframes": list(self.keyframes),
                 "live": True,
-                "event_count": len(self.events)
+                "event_count": len(self.events),
+                "events_dropped": self.events_dropped,
+                "max_events": self.max_events
             }
 
 
@@ -95,7 +112,9 @@ def run_realtime_pipeline(video_path, output_dir=None, save_keyframes=True,
     print(f"[Pipeline] 输出: {output_dir}")
 
     pipe = SmartPipeline(config)
-    consumer = StreamingConsumer()
+    # 宿主侧事件缓冲与管线共用同一上限配置（0 = 无界，默认 100000 有界）
+    consumer = StreamingConsumer(
+        max_events=(config or {}).get('max_events', StreamingConsumer.DEFAULT_MAX_EVENTS))
 
     # === 通道1+2: 画面链（实时前台）===
     cap = cv2.VideoCapture(video_path)
