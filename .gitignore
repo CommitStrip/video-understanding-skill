@@ -5,6 +5,7 @@ __pycache__/
 
 # Test / output artifacts
 out/
+output/
 keyframes/
 *.wav
 *.mp4
@@ -26,3 +27,7 @@ bench/land_compare_results.json
 # OS
 .DS_Store
 Thumbs.db
+# local tooling
+.mimosa/
+vus.egg-info/
+*.egg-info/

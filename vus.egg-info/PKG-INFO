@@ -1,3 +1,19 @@
+Metadata-Version: 2.4
+Name: vus
+Version: 0.1.0
+Summary: vus - 可安装的实时视频理解核心库（快慢双路径画面链 + 流式 ASR + 语义代表帧）
+Author: vus contributors
+License: MIT
+Keywords: video-understanding,realtime,keyframe,asr,opencv
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: opencv-python>=4.5
+Requires-Dist: numpy>=1.20
+Provides-Extra: asr
+Requires-Dist: sherpa-onnx>=1.10; extra == "asr"
+Dynamic: license-file
+
 # Video Understanding Skill
 
 把一段视频变成 **结构化、可被 LLM 高效消费的内容理解产物**。采用"三层压缩"设计：将 30fps 的十几万帧压缩为几十张语义代表帧 + 时间轴对齐字幕 + 运动段，让 AI 既能理解内容又不漏关键信息。

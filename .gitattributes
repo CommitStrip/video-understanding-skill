@@ -1,0 +1,4 @@
+# 大文件统一走 Git LFS（约束未来新增的模型/视频产物）
+*.onnx filter=lfs diff=lfs merge=lfs -text
+*.pt filter=lfs diff=lfs merge=lfs -text
+*.mp4 filter=lfs diff=lfs merge=lfs -text

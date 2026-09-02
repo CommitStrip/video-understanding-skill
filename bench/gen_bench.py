@@ -60,8 +60,11 @@ def gen_static(path, w=640, h=360, fps=30, dur=12):
         vw.write(frame)
     vw.release()
 
+# 测试视频生成到 bench/ 目录（*.mp4 已在 .gitignore 中忽略）
+BENCH = os.path.dirname(os.path.abspath(__file__))
+
 for name, fn in [('aba', gen_aba), ('slow', gen_slow), ('hue', gen_hue), ('static', gen_static)]:
-    p = f'/data/user/work/bench/{name}.mp4'
+    p = os.path.join(BENCH, f'{name}.mp4')
     fn(p)
     print(f'{name}: {os.path.getsize(p)} bytes')
 print('测试视频生成完毕')

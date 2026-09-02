@@ -17,6 +17,9 @@ import os, sys, json, glob
 import numpy as np
 import cv2
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from vus.io_utils import write_json
+
 BENCH = os.path.dirname(os.path.abspath(__file__))
 TESTS = ['aba', 'slow', 'hue', 'static']
 DIFF_SIZE = 64
@@ -131,8 +134,7 @@ def main():
             return f"{v}s" if isinstance(v, (int, float)) else str(v)
         print(f"{r['test']:<7}{r['changes_sec']:<7}{r['crv_n']:<7}{r['crv_cov']*100:<9.1f}%{fs(r['crv_s']):<9}{r['our_n']:<7}{r['our_cov']*100:<9.1f}%{fs(r['our_s']):<9}")
 
-    with open(f'{BENCH}/land_compare_results.json', 'w') as f:
-        json.dump(rows, f, ensure_ascii=False, indent=2)
+    write_json(BENCH, 'land_compare_results.json', rows)
     print(f'\n已保存: {BENCH}/land_compare_results.json')
 
 

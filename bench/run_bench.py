@@ -1,9 +1,12 @@
-import os, sys, time, json, glob
+import os, sys, time, json
+from pathlib import Path
 import numpy as np
 
-sys.path.insert(0, '/workspace/video-understanding-skill/scripts')
-from smart_pipeline import SmartPipeline
-from select_representatives import load_keyframes, select_representatives
+# 相对定位仓库根：本文件位于 <repo>/bench/，仓库根为 parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from vus.smart_pipeline import SmartPipeline
+from vus.select_representatives import load_keyframes, select_representatives
+from vus.io_utils import write_json
 
 BENCH = os.path.dirname(os.path.abspath(__file__))
 TESTS = ['aba', 'slow', 'hue', 'static']
@@ -32,7 +35,7 @@ def run_crv(video):
 
 def run_ours(video):
     """用我们的管线处理，返回 (pipeline_elapsed, pipe, reps, rep_ts)"""
-    from integrated_pipeline import run_realtime_pipeline
+    from vus.integrated_pipeline import run_realtime_pipeline
     outdir = os.path.join(BENCH, f'our_out_{os.path.basename(video)[:-4]}')
     os.makedirs(outdir, exist_ok=True)
     t0 = time.time()
@@ -83,6 +86,5 @@ print('\n\n===== 汇总 =====')
 for r in results:
     print(json.dumps(r, ensure_ascii=False))
 
-with open(f'{BENCH}/bench_results.json', 'w') as f:
-    json.dump(results, f, ensure_ascii=False, indent=2)
+write_json(BENCH, 'bench_results.json', results)
 print(f'\n已保存: {BENCH}/bench_results.json')
