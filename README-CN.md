@@ -4,19 +4,20 @@
 
 [English](README.md) | **简体中文**
 
-把一段视频变成**结构化、可被大模型高效消费的内容理解产物**：语义代表帧 + 时间轴对齐的 ASR 字幕 + 运动段。把 30fps 的十几万帧原始视频压缩成几十张多模态模型真正读得过来的代表帧——且不漏关键内容。
+把一段视频变成**结构化、可被大模型高效消费的内容理解产物**：语义代表帧 + 时间轴对齐的 ASR 字幕 + 运动段。把 30fps 的十几万帧原始视频压缩成几十张多模态模型真正读得过来的代表帧——且不漏关键内容。v0.4 起，同一套三层压缩架构延伸到**实时视频流**：LLM 进环路边看边懂，理解滞后有界不增长（见[实时理解](#实时理解边看边懂v04)）。
 
 实战基准：120 分钟 1080p25 直播课程——**处理速率 147.7fps（5.9× 实时）**、41 个关键帧、3505 段真实中文字幕（约 3.3 万字）、内存全程稳定。
 
 ## 核心特性
 
+- **实时理解（v0.4 新增）**——`vus.live` 四层理解栈：毫秒级本地语义标签 + 触发式 VLM 滚动理解（费用有上限旋钮）+ SSE 状态服务，为机器人实时视觉铺路。
 - **实时预算分配**——快系统（逐帧运动门控，约占 3% 预算）触发慢系统（低频关键帧 + 触发式重活）。能直接跑在机器人/边缘设备上，不只是文件回放。
 - **实时源**——视频文件 / 摄像头 / RTSP 流统一 `FrameSource` 接口；RTSP 带最新帧背压、断流自动重连、单调时钟时间戳。
 - **三层压缩**——原始帧 → 镜头级关键帧 → 语义代表帧，解决"镜头切换 ≠ 内容变化"的冗余问题。
 - **渐变演化不丢帧**——课件批注推进、镜头缓摇这类缓慢内容演化，由漂移确认机制捕获，不再只认硬切换。
 - **真 ASR**——基于 sherpa-onnx 的中英双语流式语音识别，词级时间戳；模型缺失时显式降级、绝不静默造假。
 - **可选语义增强**——CLIP（ONNX，不依赖 PyTorch）语义选帧；OCR 通道提取课件文字。
-- **可安装、有测试**——`pip install -e .`，96 个 pytest 用例，GitHub Actions CI。
+- **可安装、有测试**——`pip install -e .`，200+ 个 pytest 用例，GitHub Actions CI。
 
 ## 安装
 
@@ -75,6 +76,49 @@ python -m vus.select_representatives --keyframes out/keyframes \
 
 多模态模型只需读 `representatives.json` 里的代表帧和对齐字幕，即可产出结构化理解报告。
 
+## 实时理解：边看边懂（v0.4）
+
+离线管线解决"把一段视频压缩给 LLM 读"；`vus.live` 解决"直播流进来，LLM 边看边懂"。
+四层理解栈，每层按自己的物理极限跑满：
+
+| 层 | 输出 | 延迟 | 成本 |
+|----|------|------|------|
+| T0 帧级反射 | 运动事件 + 运动框 | 0ms（单帧 ~1.6ms） | 零（快系统） |
+| T0.5 语义标签 | 人脸/运动强度等即席标签 | 毫秒级/帧 | 零（本地，无模型下载） |
+| T2 滚动理解 | 当前摘要/时间线/实体 | 滞后有界（VLM 延迟 + 触发间隔） | 按调用计费，触发式 + 地板间隔控制 |
+
+> 毫秒级语义由 T0+T0.5 承担；富语义理解受 VLM 推理延迟的物理下限约束，架构保证是
+> **滞后有界、永不增长**——VLM 在跑时素材只累积不排队（单飞合并），完成后下一窗取合并后的最新。
+
+```bash
+# 文件仿真实时（开发与验收默认路径；mock 后端零成本跑通全链）
+python -m vus.live --video lecture.mp4 --realtime --vlm mock --serve
+
+# RTSP 直播 + 真实 VLM（OpenAI 兼容 env：VLM_API_BASE / VLM_API_KEY / VLM_MODEL）
+python -m vus.live --source rtsp --url rtsp://host/stream --vlm openai --serve
+
+# 纯本地免费模式（只跑 T0+T0.5，零 API 成本）
+python -m vus.live --video x.mp4 --realtime --vlm off --serve
+```
+
+成本旋钮：
+
+- **触发式调用**——场景切换 / 长运动段闭合 / 新语音段才发起，安静场景零调用；
+- **地板间隔** `--min-call-interval`（默认 8s）——最坏费用上限 = 时长 ÷ 间隔 × 单次成本；
+- **单次调用瘦身**——最新 1-2 张 448px 关键帧 + 增量语音文本 + 压缩运动统计；
+- `--vlm off` 完全不调用。
+
+理解结果三路消费（可同时）：
+
+- **滚动文件**——`live_state.json`（机器可读）+ `live_context.md`（人/agent 可读），
+  原子落盘，任何 agent 任何时刻读文件即得当前理解（与离线 SKILL 工作流衔接）；
+- **SSE 服务**——`--serve` 后 `GET /state` 快照、`GET /events` 增量事件流、
+  `GET /healthz` 探活，是机器人与监控面板的订阅入口；
+- **控制台**——周期打印当前摘要、分层滞后与调用遥测。
+
+长直播防膨胀：理解时间线超限自动把最旧条目合并成"前情章节"（纯文本，零 VLM 成本）；
+语音段与标签环均有界，内存不随时长增长。
+
 ## 工作原理
 
 | 层级 | 内容 | 数量级 | 用途 |
@@ -122,9 +166,19 @@ vus/                       可安装核心（pip install -e .）
   clip_onnx.py             onnxruntime 版 CLIP ViT-B/32（无 torch）
   ocr_channel.py           可选 OCR 通道
   io_utils.py, pathsafe.py 安全落盘写（防路径穿越）
+  live/                    实时理解层（v0.4）
+    pipeline.py            四层编排器（python -m vus.live）
+    understanding.py       触发式 VLM worker（单飞合并/时间线压缩/退避）
+    state.py               SessionState + 滚动原子落盘
+    server.py              SSE 状态服务（/state /events /healthz）
+    tagger.py              T0.5 毫秒级标签道
+    vlm_client.py          VLM 后端注册表（openai/mock）
+    audio_source.py        直播音频链（ffmpeg 直通 PCM → 定长块）
+    events.py              有界 EventBus
+    rolling_align.py       流式对齐器（批式对齐的增量版）
 scripts/                   旧命令入口（薄壳，继续可用）
 bench/                     crv 对比 + 语义级评估协议
-tests/                     96 个 pytest 用例 + 端到端冒烟
+tests/                     pytest 用例 + 端到端冒烟（含 file-as-live 全链路）
 ```
 
 ## 作为 AI 技能使用

@@ -8,6 +8,9 @@ Turn a video into **structured, LLM-ready understanding artifacts**: semantic
 representative frames + timeline-aligned ASR subtitles + motion segments.
 Compress 30 fps raw video (hundreds of thousands of frames) into a few dozen
 frames a multimodal model can actually read — without missing what matters.
+Since v0.4 the same three-tier compression architecture extends to **live
+video streams**: the LLM joins the loop and understands while watching, with
+lag that stays bounded (see [Live understanding](#live-understanding-v04)).
 
 Real-world benchmark — a 120-minute 1080p25 live course:
 **147.7 fps processing (5.9× realtime)**, 41 keyframes, 3,505 segments of real
@@ -15,6 +18,9 @@ Mandarin subtitles (~33k characters), stable memory footprint.
 
 ## Key features
 
+- **Live understanding (new in v0.4)** — `vus.live`: a four-layer stack with
+  millisecond local tagging + trigger-based rolling VLM understanding
+  (capped cost knob) + an SSE state service, built for robot realtime vision.
 - **Realtime budget allocation** — a fast system (per-frame motion gating,
   ~3% of budget) triggers a slow system (low-frequency keyframing + triggered
   heavy work). Runs live on robots/edge devices, not just file replay.
@@ -31,7 +37,7 @@ Mandarin subtitles (~33k characters), stable memory footprint.
   when the model is absent.
 - **Optional semantic enhancement** — CLIP (ONNX, no PyTorch) for semantic
   frame selection; OCR channel for slide text.
-- **Installable & tested** — `pip install -e .`, 96 pytest cases, GitHub
+- **Installable & tested** — `pip install -e .`, 200+ pytest cases, GitHub
   Actions CI.
 
 ## Installation
@@ -95,6 +101,59 @@ python -m vus.select_representatives --keyframes out/keyframes \
 Reading `representatives.json` and the aligned subtitles is all a multimodal
 model needs to produce a lecture notes / plot summary / scene report.
 
+## Live understanding (v0.4)
+
+The offline pipeline answers "compress a video for an LLM to read"; `vus.live`
+answers "a stream is coming in — understand it as it happens". Four layers,
+each running at its own physical limit:
+
+| Layer | Output | Latency | Cost |
+|-------|--------|---------|------|
+| T0 frame reflex | motion events + boxes | 0 ms (~1.6 ms/frame) | zero (fast system) |
+| T0.5 semantic tags | face/motion-intensity tags per keyframe | ms-level | zero (local, no model download) |
+| T2 rolling understanding | current summary / timeline / entities | bounded lag (VLM latency + trigger interval) | per call; trigger-based with a floor interval |
+
+> Millisecond-scale semantics come from T0+T0.5. Rich understanding is bounded
+> by VLM inference latency — the architectural guarantee is that **lag stays
+> bounded and never grows**: while a VLM call is in flight, material only
+> accumulates (single-flight coalescing), and the next call takes the merged
+> latest window.
+
+```bash
+# file-as-live (default dev/acceptance path; mock backend costs nothing)
+python -m vus.live --video lecture.mp4 --realtime --vlm mock --serve
+
+# RTSP live + real VLM (OpenAI-compatible env: VLM_API_BASE / VLM_API_KEY / VLM_MODEL)
+python -m vus.live --source rtsp --url rtsp://host/stream --vlm openai --serve
+
+# pure-local free mode (T0+T0.5 only, zero API cost)
+python -m vus.live --video x.mp4 --realtime --vlm off --serve
+```
+
+Cost knobs:
+
+- **Trigger-based calls** — only scene changes / long motion segments closing /
+  new speech fire a call; quiet scenes cost nothing;
+- **Floor interval** `--min-call-interval` (default 8 s) — worst-case spend =
+  duration ÷ interval × per-call cost;
+- **Slim calls** — the latest 1–2 keyframes at 448 px + incremental speech
+  text + compacted motion stats;
+- `--vlm off` calls nothing at all.
+
+Three consumption channels (usable together):
+
+- **Rolling files** — `live_state.json` (machine-readable) +
+  `live_context.md` (human/agent-readable), atomically written; any agent can
+  read the current understanding at any moment (mirrors the offline SKILL flow);
+- **SSE service** — with `--serve`: `GET /state` snapshot, `GET /events`
+  incremental stream, `GET /healthz` liveness — the subscription entry point
+  for robots and monitoring dashboards;
+- **Console** — periodic summary, per-layer lag and call telemetry.
+
+Long-session anti-bloat: when the understanding timeline overflows, the oldest
+entries merge into "previous chapters" (plain text, zero VLM cost); speech and
+tag rings are bounded, so memory does not grow with duration.
+
 ## How it works
 
 | Tier | Content | Scale | Purpose |
@@ -154,9 +213,19 @@ vus/                       installable core (pip install -e .)
   clip_onnx.py             CLIP ViT-B/32 via onnxruntime (no torch)
   ocr_channel.py           optional OCR channel
   io_utils.py, pathsafe.py safe output writing (traversal-guarded)
+  live/                    live understanding layer (v0.4)
+    pipeline.py            four-layer orchestrator (python -m vus.live)
+    understanding.py       trigger-based VLM worker (coalescing / compaction / backoff)
+    state.py               SessionState + rolling atomic persistence
+    server.py              SSE state service (/state /events /healthz)
+    tagger.py              T0.5 ms-level tagging lane
+    vlm_client.py          VLM backend registry (openai/mock)
+    audio_source.py        live audio chain (ffmpeg PCM → fixed blocks)
+    events.py              bounded EventBus
+    rolling_align.py       streaming aligner (incremental twin of batch align)
 scripts/                   legacy entry points (thin shims, still work)
 bench/                     crv comparison + semantic evaluation protocol
-tests/                     96 pytest cases + end-to-end smoke
+tests/                     pytest cases + end-to-end smoke (incl. file-as-live)
 ```
 
 ## Use as an agent skill

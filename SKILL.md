@@ -79,6 +79,40 @@ python -m vus.select_representatives --keyframes <输出目录>/keyframes \
 
 每条结论都应引用代表帧文件名或字幕时间戳作为依据。
 
+## 实时流理解（v0.4：python -m vus.live）
+
+用户给出 **RTSP 流 / 摄像头 / 直播画面**，或明确要求"边看边理解 / 实时理解"时，
+不要走上面的离线批处理，改用实时理解栈（四层：帧级反射 → 毫秒级本地标签 →
+触发式 VLM 滚动理解）：
+
+```bash
+# 文件仿真实时（开发/验收默认路径；mock 后端零成本）
+python -m vus.live --video <视频路径> --realtime --vlm mock --serve
+
+# RTSP 直播 + 真实 VLM（OpenAI 兼容端点走环境变量）
+VLM_API_BASE=https://open.bigmodel.cn/api/paas/v4 VLM_API_KEY=<密钥> VLM_MODEL=glm-4v-plus \
+  python -m vus.live --source rtsp --url rtsp://主机/流 --vlm openai --serve
+
+# 纯本地免费模式（零 API 成本，只有帧级反射 + 毫秒标签）
+python -m vus.live --video <视频路径> --realtime --vlm off --serve
+```
+
+理解结果三路消费：
+
+1. **滚动文件（agent 首选）**——`live_context.md`（人/agent 可读摘要）与
+   `live_state.json`（全量状态：滚动摘要/时间线/实体/分层滞后遥测）在输出目录
+   持续原子更新。回答"现在画面里在干什么"直接 Read 这两个文件，无需等进程结束。
+2. **SSE 服务**——`--serve` 后 `GET /state`（快照）、`GET /events`（增量流）、
+   `GET /healthz`（探活），供程序订阅。
+3. **控制台**——周期打印当前摘要与滞后遥测。
+
+成本与延迟要点：T2 是**触发式**调用（场景切换/长运动段闭合/新语音段才调用），
+`--min-call-interval`（默认 8s）是费用上限旋钮；理解滞后 = 触发间隔 + VLM 延迟，
+有界不增长。毫秒级语义（有没有人/强运动）来自本地标签道，不经 API。
+
+🔴 **警告：`--vlm mock` 的理解输出是占位假文本（同 mock 字幕红线）——禁止把
+mock 理解当作真实内容交付**，必须在报告里注明理解层未接真实模型。
+
 ## 注意事项
 
 - **必须用多模态模型**读代表帧，纯文本模型无法完成画面理解。
