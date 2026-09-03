@@ -56,9 +56,14 @@ python -m vus.integrated_pipeline --video lecture.mp4 --output out/ --kf-hz 1.5
 # 直播 / RTSP 实时流变体
 python -m vus.integrated_pipeline --source rtsp --url rtsp://host/stream --output out/
 
+# 带 OCR（只对 Tier3 代表帧执行——不进逐帧路径；ASR 输出自动清洗：
+# 循环折叠 + 相邻去重 + 幻觉标记）
+python -m vus.integrated_pipeline --video lecture.mp4 --output out/ --ocr
+
 # 2. 压缩为语义代表帧（Tier 3）
+#    --max-reps: 按预算自适应选帧（LLM 消费场景推荐）
 python -m vus.select_representatives --keyframes out/keyframes \
-  --interval 60 --out representatives.json --report context.md
+  --max-reps 60 --out representatives.json --report context.md
 
 # 多人近景轮换（圆桌/访谈）？保留桶内多样性：
 python -m vus.select_representatives --keyframes out/keyframes \

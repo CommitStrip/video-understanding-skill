@@ -20,7 +20,7 @@ description: "把视频（尤其直播课程、讲座、长视频）变成结构
    🔴 **警告：sherpa-onnx 未安装或自动下载被关闭且模型缺失时，字幕是
    "mock 占位假文本"（固定提示语，非真实内容）——禁止把 mock 字幕当作
    真实转写交付给用户**，必须在报告里注明字幕缺失。
-3. 可选增强：`pip install -e ".[clip]"` + `bash scripts/download_clip_onnx.sh`（CLIP 语义选帧，权重目录 `VUS_CLIP_MODELS`）；`pip install -e ".[ocr]"` + 管线 `--ocr`（幻灯片文字提取）。
+3. 可选增强：`pip install -e ".[clip]"` + `bash scripts/download_clip_onnx.sh`（CLIP 语义选帧，权重目录 `VUS_CLIP_MODELS`）；`pip install -e ".[ocr]"` + 管线 `--ocr`（花字/内嵌字幕提取，Tier3 定点执行）。
 
 ## 工作流
 
@@ -30,6 +30,7 @@ description: "把视频（尤其直播课程、讲座、长视频）变成结构
 python -m vus.integrated_pipeline --video <视频路径> --output <输出目录> --kf-hz 1.5
 # 直播/RTSP 实时流变体：
 python -m vus.integrated_pipeline --source rtsp --url rtsp://主机/流 --output <输出目录>
+# 带花字/内嵌字幕的视频加 --ocr（只对 Tier3 代表帧执行，不拖慢管线）
 ```
 
 产出：`<输出目录>/keyframes/`（镜头级关键帧）、`pipeline_results.json`（时间表+运动段）、`aligned_output.json`（对齐字幕）。已有产物时可跳过本步。
@@ -38,18 +39,25 @@ python -m vus.integrated_pipeline --source rtsp --url rtsp://主机/流 --output
 
 ```bash
 python -m vus.select_representatives --keyframes <输出目录>/keyframes \
-  --interval 60 --out representatives.json --report context.md
+  --max-reps 60 --out representatives.json --report context.md
 ```
 
-参数选择：多人近景轮换（圆桌/访谈）加 `--k 3` 每桶保留 3 张互不冗余的代表帧；内容单调的监控流加 `--adaptive` 自动放宽；语义增强加 `--clip`。
+参数选择：`--max-reps 60` 按 LLM 上下文预算自适应选帧（推荐默认）；多人近景
+轮换（圆桌/访谈）加 `--k 3` 每桶保留 3 张互不冗余的代表帧；内容单调的监控流
+加 `--adaptive` 自动放宽；语义增强加 `--clip`。
 
 ### 第 3 步：读代表帧做内容理解
 
-用 Read 工具读取 `representatives.json` 里的代表帧图片，结合 `context.md` 与 `aligned_output.json`：
+用 Read 工具读取 `representatives.json` 里的代表帧图片，结合 `context.md`
+与 `aligned_output.json` 理解：
 
 1. **首帧与尾帧必读**——锁定节目类型 + 主题 + 最终结论
 2. 场景构成、人物角色（画面 + 字幕交叉验证）
 3. 话题时间线（运动段密度 + 代表帧变化 + 字幕关键词）
+
+字幕字段说明：ASR 输出已经过清洗（连叠折叠 + 相邻去重），`hallucination: true`
+的段是音乐/静音段的高概率英文幻觉（如 SIL/ER），**不要当作真实台词引用**；
+带 `ocr_hint` 的段表示画面 OCR 文本与该段高度相似，可作专名纠错参考。
 
 ### 第 4 步：输出结构化报告
 

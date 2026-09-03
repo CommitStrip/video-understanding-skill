@@ -75,9 +75,14 @@ python -m vus.integrated_pipeline --video lecture.mp4 --output out/ --kf-hz 1.5
 # live stream variant
 python -m vus.integrated_pipeline --source rtsp --url rtsp://host/stream --output out/
 
+# with OCR (runs on Tier-3 representative frames only — stays out of the
+# frame loop; ASR output is auto-cleaned: loop-collapse + dedup + hallucination flags)
+python -m vus.integrated_pipeline --video lecture.mp4 --output out/ --ocr
+
 # 2. Compress to semantic representative frames (Tier 3)
+#    --max-reps: budget-oriented adaptive selection (recommended for LLM use)
 python -m vus.select_representatives --keyframes out/keyframes \
-  --interval 60 --out representatives.json --report context.md
+  --max-reps 60 --out representatives.json --report context.md
 
 # multi-speaker roundtables? keep per-bucket diversity:
 python -m vus.select_representatives --keyframes out/keyframes \

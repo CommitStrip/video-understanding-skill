@@ -99,7 +99,9 @@ def _asr_job(video_path, wav_path, out_segments, sr=16000):
         return
     recognizer = load_streaming_recognizer()
     segs = transcribe_streaming(recognizer, samples, sr2)
-    out_segments.extend(segs)
+    # 清洗层：连叠折叠 + 相邻去重 + 幻觉标记（纯后处理，不动解码引擎）
+    from .asr_clean import clean_asr_segments
+    out_segments.extend(clean_asr_segments(segs))
 
 
 def run_realtime_pipeline(video_path=None, output_dir=None, save_keyframes=True,
@@ -115,10 +117,12 @@ def run_realtime_pipeline(video_path=None, output_dir=None, save_keyframes=True,
                 支持摄像头 / RTSP 直播流与实时回放；不传时内部用
                 FileSource(video_path) 包一层，行为与旧版完全一致。
       video_path: 视频文件路径；source 为 None 时必填。
-      ocr:      W3 可选 OCR 第三通道（默认关）。开启时对每个关键帧稀疏跑
-                一次 OCR，事件进 consumer 并落到 aligned_output.json 的
-                "ocr_events" 键；rapidocr 未安装时显式报错（不静默降级），
-                依赖懒加载——不开 OCR 时零额外依赖。
+      ocr:      可选 OCR 文字链（默认关）。管线完成后对 Tier3 语义代表帧
+                （内嵌 interval=60 选帧）逐帧执行——不在 Tier2 逐帧路径上，
+                实测比逐关键帧 OCR 快约 25 倍；事件落到 aligned_output.json
+                的 "ocr_events" 键，并经 reconcile 对 ASR 段标注 ocr_hint。
+                开启时自动保存关键帧（OCR 输入）。rapidocr 未安装时显式报错
+                （不静默降级），依赖懒加载——不开 OCR 时零额外依赖。
 
     时间戳:
       直播源（Camera/RTSP）事件用 source.read() 返回的单调时钟 timestamp；
@@ -168,17 +172,14 @@ def run_realtime_pipeline(video_path=None, output_dir=None, save_keyframes=True,
               f"{getattr(source, 'height', 0)} @ {fps:.1f}fps, "
               f"{total_frames}帧, {duration:.1f}s")
 
+    if ocr:
+        save_keyframes = True  # OCR 的输入就是关键帧图，开启 OCR 时强制保存
     os.makedirs(output_dir, exist_ok=True)  # save_keyframes=False 时也保证产物目录存在
     keyframes_dir = os.path.join(output_dir, 'keyframes')
     if save_keyframes:
         os.makedirs(keyframes_dir, exist_ok=True)
 
-    # === 通道4: 文字链（OCR，可选默认关；懒加载，不开零依赖）===
-    ocr_channel = None
-    if ocr:
-        from .ocr_channel import OcrChannel  # 函数内懒加载：不开 --ocr 零依赖
-        ocr_channel = OcrChannel()  # rapidocr 未安装时显式抛 RuntimeError
-        print("[Pipeline] OCR 第三通道已启用（仅关键帧稀疏执行）")
+    # === 通道4: 文字链（OCR）——延后到管线完成后，仅对 Tier3 代表帧执行 ===
 
     # === 通道3: 声音链（后台并行；仅文件源有音频，直播源跳过）===
     wav_path = extract_audio(video_path, sr=16000) if video_path else None
@@ -225,16 +226,11 @@ def run_realtime_pipeline(video_path=None, output_dir=None, save_keyframes=True,
             # 保存关键帧（若本帧产生关键帧）；OCR 通道对关键帧稀疏执行
             if frame_events:
                 for ev in frame_events:
-                    if ev["type"] == "keyframe":
-                        if save_keyframes:
-                            kf_path = os.path.join(keyframes_dir,
-                                                   f"kf_{kf_count:04d}_t{timestamp:.1f}s.jpg")
-                            cv2.imwrite(kf_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
-                            kf_count += 1
-                        # 文字链：每关键帧一次 OCR，事件立即进 consumer（流式）
-                        if ocr_channel is not None:
-                            for ocr_ev in ocr_channel.process(frame, timestamp):
-                                consumer.consume(ocr_ev)
+                    if ev["type"] == "keyframe" and save_keyframes:
+                        kf_path = os.path.join(keyframes_dir,
+                                               f"kf_{kf_count:04d}_t{timestamp:.1f}s.jpg")
+                        cv2.imwrite(kf_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                        kf_count += 1
 
             frame_idx += 1
             if frame_idx % 500 == 0:
@@ -272,10 +268,25 @@ def run_realtime_pipeline(video_path=None, output_dir=None, save_keyframes=True,
     print("[Pipeline] 时间轴对齐融合...")
     aligned = pipe.align_asr_streaming(asr_segments) if asr_segments else []
 
-    # W3: OCR 第三通道事件按时间序并入 aligned_output（新增键，不动现有键）
-    ocr_events = sorted(
-        (e for e in consumer.snapshot()["events"] if e.get("type") == "ocr"),
-        key=lambda e: e["t"])
+    # W6: 文字链（OCR）——管线完成后仅对 Tier3 语义代表帧执行（不在逐帧路径）。
+    # 抖音实测：823 关键帧逐帧 OCR 会把管线拖到 1:1 实时；Tier3 定点 OCR 快约 25 倍。
+    ocr_events = []
+    if ocr:
+        from .ocr_channel import OcrChannel  # 懒加载：rapidocr 未安装时显式抛 RuntimeError
+        from .select_representatives import select_representatives
+        ocr_channel = OcrChannel()
+        reps = select_representatives(keyframes_dir, interval=60)
+        print(f"[Pipeline] OCR: 对 {len(reps)} 张 Tier3 代表帧执行…")
+        for rep in reps:
+            img = cv2.imread(rep["path"])
+            if img is None:
+                continue
+            ocr_events.extend(ocr_channel.process(img, rep["t"]))
+        ocr_events.sort(key=lambda e: e["t"])
+        # 跨模态标注：OCR 文本与 ASR 段高相似时给出 ocr_hint（只标注不替换）
+        if ocr_events and asr_segments:
+            from .reconcile import reconcile
+            asr_segments = reconcile(asr_segments, ocr_events)
 
     # === 保存结果（中断时保存的即部分结果）===
     summary = pipe.get_summary()
@@ -307,7 +318,7 @@ def run_realtime_pipeline(video_path=None, output_dir=None, save_keyframes=True,
     print(f"  运动段:         {summary['motion_segments']}")
     print(f"  关键帧:         {summary['keyframes']}")
     print(f"  ASR段:          {len(asr_segments)}")
-    if ocr_channel is not None:
+    if ocr:
         print(f"  OCR事件:        {len(ocr_events)}")
     print(f"  对齐段:         {len(aligned)}")
     print(f"  画面链耗时:     {pipeline_time:.1f}s")

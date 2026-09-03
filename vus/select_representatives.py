@@ -404,6 +404,10 @@ def main():
     ap.add_argument("--adaptive", action="store_true",
                     help="自适应桶宽: 静止段(pixel_diff<3%%)桶宽倍增(最多4x), "
                          "高活跃段(>20%%)减半(最低0.5x)")
+    ap.add_argument("--max-reps", type=int, default=None,
+                    help="代表帧数量上限: 自动推算 interval 并迭代校正(最多5轮), "
+                         "LLM 消费场景推荐 --max-reps 60 替代裸调 --interval; "
+                         "与 --interval 并存时覆盖初始值")
     ap.add_argument("--out", default=None, help="输出代表帧 JSON 路径")
     ap.add_argument("--report", default=None, help="输出 LLM 上下文 Markdown 路径")
     args = ap.parse_args()
@@ -429,16 +433,32 @@ def main():
     print(f"[Select] 管线关键帧: {info['count']} 帧, 跨度 {info['span_s']}s, "
           f"平均间隔 {info['avg_interval_s']}s")
 
-    reps = select_representatives(args.keyframes, args.interval,
-                                  args.dedup_threshold, clip_engine, args.w_pix,
-                                  k=args.k, adaptive=args.adaptive)
+    # W7: --max-reps 自适应——按时长/上限推算初始 interval，超限则迭代放大（≤5 轮）
+    interval = args.interval
+    if args.max_reps and args.max_reps > 0 and info.get("span_s"):
+        interval = max(1.0, info["span_s"] / args.max_reps)
+        print(f"[Select] --max-reps {args.max_reps}: 初始 interval -> {interval:.1f}s")
+
+    max_iters = 5
+    for attempt in range(max_iters):
+        reps = select_representatives(args.keyframes, interval,
+                                      args.dedup_threshold, clip_engine, args.w_pix,
+                                      k=args.k, adaptive=args.adaptive)
+        if not args.max_reps or len(reps) <= args.max_reps:
+            break
+        if attempt == max_iters - 1:
+            break
+        interval = round(interval * (len(reps) / args.max_reps) ** 1.1, 1) + 0.1
+        print(f"[Select] 代表帧 {len(reps)} > 上限 {args.max_reps}，"
+              f"interval -> {interval:.1f}s 重试")
+
     mode = f"k={args.k}" + (", adaptive" if args.adaptive else "")
-    print(f"[Select] 语义代表帧: {len(reps)} 张 ({mode}) "
+    print(f"[Select] 语义代表帧: {len(reps)} 张 ({mode}, interval={interval:.1f}s) "
           f"(压缩到 {len(reps)/info['count']*100:.1f}%)")
 
     if args.out:
         write_json(os.path.dirname(args.out) or '.', os.path.basename(args.out),
-                   {"count": len(reps), "interval": args.interval,
+                   {"count": len(reps), "interval": interval,
                     "k": args.k, "adaptive": args.adaptive,
                     "representatives": reps})
         print(f"[Select] 已保存: {args.out}")
