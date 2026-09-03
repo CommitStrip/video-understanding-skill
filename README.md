@@ -1,189 +1,186 @@
-# Video Understanding Skill
+# vus — Video Understanding Skill
 
-把一段视频变成 **结构化、可被 LLM 高效消费的内容理解产物**。采用"三层压缩"设计：将 30fps 的十几万帧压缩为几十张语义代表帧 + 时间轴对齐字幕 + 运动段，让 AI 既能理解内容又不漏关键信息。
+[![CI](https://github.com/CommitStrip/video-understanding-skill/actions/workflows/ci.yml/badge.svg)](https://github.com/CommitStrip/video-understanding-skill/actions/workflows/ci.yml)
 
-源自真实项目：75 分钟视频，管线产出 1609 张关键帧，LLM 经语义压缩后只需约 60-80 张代表帧即可完整理解。
+**English** | [简体中文](README-CN.md)
 
-## 安装
+Turn a video into **structured, LLM-ready understanding artifacts**: semantic
+representative frames + timeline-aligned ASR subtitles + motion segments.
+Compress 30 fps raw video (hundreds of thousands of frames) into a few dozen
+frames a multimodal model can actually read — without missing what matters.
 
-```bash
-pip install -e .            # 核心管线 v0.2.0（opencv + numpy）
-pip install -e ".[asr]"     # 可选：sherpa-onnx 流式 ASR
-```
+Real-world benchmark — a 120-minute 1080p25 live course:
+**147.7 fps processing (5.9× realtime)**, 41 keyframes, 3,505 segments of real
+Mandarin subtitles (~33k characters), stable memory footprint.
 
-两种等价运行方式（`vus` 已是可安装包，当前版本 **0.2.0**）：
+## Key features
 
-```bash
-python -m vus.integrated_pipeline --video 视频.mp4 --output out/   # 推荐
-python scripts/integrated_pipeline.py --video 视频.mp4 --output out/  # 兼容入口
-```
+- **Realtime budget allocation** — a fast system (per-frame motion gating,
+  ~3% of budget) triggers a slow system (low-frequency keyframing + triggered
+  heavy work). Runs live on robots/edge devices, not just file replay.
+- **Live sources** — video file, camera, or RTSP stream through one
+  `FrameSource` interface; RTSP gets latest-frame backpressure, automatic
+  reconnection and monotonic timestamps.
+- **Three-tier compression** — raw frames → shot-level keyframes → semantic
+  representative frames. Solves "shot changes ≠ content changes".
+- **Drift-resilient keyframing** — gradual content evolution (e.g. slide
+  annotations building up in a lecture) is captured via drift confirmation,
+  not just hard scene cuts.
+- **Real ASR** — streaming bilingual (zh/en) speech recognition via
+  sherpa-onnx, with word-level timestamps. Degrades loudly, never silently,
+  when the model is absent.
+- **Optional semantic enhancement** — CLIP (ONNX, no PyTorch) for semantic
+  frame selection; OCR channel for slide text.
+- **Installable & tested** — `pip install -e .`, 96 pytest cases, GitHub
+  Actions CI.
 
-## 仓库结构（v0.2 分层）
-
-```
-vus/（可安装核心包 · 域无关的视频理解）
-    smart_pipeline.py            实时预算分配 · 画面链（快/慢双系统）
-    integrated_pipeline.py       三通道流式编排（画面 + 声音 + 对齐）
-    asr_sherpa.py                流式 ASR 声音链（sherpa-onnx / mock fallback）
-    select_representatives.py    Tier3 语义代表帧选择（内容理解层）
-    source.py                    实时源抽象（文件/相机/RTSP，背压 + 重连）
-    clip_onnx.py / ocr_channel.py  CLIP 语义增强（ONNX）+ OCR 第三通道
-    validate_realtime.py         实时率验证（720p50 / 1080p30）
-    io_utils.py / pathsafe.py    安全落盘与路径收敛
-apps/anti_drone/（反无人机应用栈 · 建立在核心之上）
-    detection_pipeline.py        触发式目标检测中系统层
-    detection_range.py           检测距离估算（针孔模型）
-    models/                      YOLO 检测模型（*.pt / *.onnx）
-    bench/                       Phase II 逐模块性能实测（bench_phase2.py 等）
-    reports/                     实机测试与判别基准报告（HTML / 视频）
-devices/（设备控制层）
-    localization.py              单目定位（地面测距 / 方位角）
-    gis_ptz.py                   GIS 导出 + PTZ 瞄准联动（slew-to-cue）
-    onvif_ptz.py                 ONVIF PTZ 协议下发
-    slew_confirm.py              转向-确认闭环
-    multi_cam_handover.py        多站相机目标交接
-    *_config.example.json        相机 / 云台 / ONVIF 配置样例
-scripts/                         兼容入口：薄壳 re-export，旧命令全部不变
-bench/                           视频理解对比基准（crv 对比 + semantic_eval）
-tests/                           pytest 单测与端到端冒烟
-```
-
-> `vus/` 是域无关的理解核心；`apps/anti_drone/` 与 `devices/` 是建立在核心之上的
-> 衍生应用与设备控制层，不进 wheel，经仓库根 sys.path 以 `apps.anti_drone.*` /
-> `devices.*` 包方式导入，二者复用同一套快慢双路径架构
-> （`SmartSurveillancePipeline` 继承自 `SmartPipeline`）。`scripts/` 保留全部旧
-> 命令入口（薄壳）。模型与产物配置：ASR 模型目录可用环境变量
-> `VUS_SHERPA_MODELS` 指定；CLIP 权重目录可用 `VUS_CLIP_MODELS` 指定（权重经
-> `scripts/download_clip_onnx.sh` 下载，不入库）。低配环境下若遇 OpenBLAS
-> "Memory allocation" 报错，设 `OPENBLAS_NUM_THREADS=1` 规避。
-
-## 核心价值
-
-- **实时预算分配**：快系统（逐帧运动检测）+ 慢系统（低频关键帧），可实时跑在机器人/产品上（实测 720p50 达 441fps，1080p30 达 202fps，均超实时数倍）。
-- **三层压缩**：原始帧 → 镜头级关键帧 → 语义代表帧，解决"镜头切换 ≠ 内容变化"的冗余问题。
-- **流式输出**：每帧产出增量事件，宿主无需等整段即可实时消费。
-- **多模态融合**：画面（运动+关键帧）+ 声音（流式 ASR）时间轴对齐，输出结构化语义流。
-
-## 快速开始
+## Installation
 
 ```bash
-# 1. 安装依赖
-pip install opencv-python numpy
-# 可选：流式 ASR（缺省走 mock fallback）
-pip install sherpa-onnx
+pip install -e .                 # core (opencv-python + numpy)
 
-# 2. 跑管线提取结构化产物（关键帧 + 运动段 + ASR 字幕）
-python scripts/integrated_pipeline.py --video 视频.mp4 --output out/
-
-# 3. 压缩为语义代表帧（供 LLM 内容理解）
-python scripts/select_representatives.py \
-  --keyframes out/keyframes \
-  --interval 60 \
-  --out representatives.json \
-  --report context.md
-
-# 3b. （可选）启用 CLIP 语义增强，桶内按"像素差分 + CLIP 语义距离"打分选帧
-#     默认关闭；需真实 CLIP 权重（openai/clip ViT-B/32，外网下载），离线会显式报错
-python scripts/select_representatives.py --keyframes out/keyframes \
-  --interval 60 --clip --w-pix 0.5 \
-  --out representatives_clip.json --report context_clip.md
-
-# 4. 读取代表帧结合字幕做内容理解，输出报告
+# optional extras
+pip install -e ".[asr]"          # sherpa-onnx streaming ASR (real subtitles)
+pip install -e ".[clip]"         # CLIP semantic frame selection (ONNX)
+pip install -e ".[ocr]"          # OCR channel
 ```
 
-## 目录结构
+Models are not bundled:
 
-```
-video-understanding-skill/
-├── vus/                  # 可安装核心包（画面链/ASR/代表帧/实时源/CLIP/OCR）
-├── apps/anti_drone/      # 反无人机应用栈（检测管线/模型/性能基准/报告）
-├── devices/              # 设备控制层（定位/GIS/云台/ONVIF/多机协同）
-├── scripts/              # 兼容入口薄壳（旧命令全部不变）
-├── bench/                # 视频理解对比基准（crv 对比 + semantic_eval 语义评估）
-├── tests/                # pytest 单测与端到端冒烟
-├── SKILL.md              # Skill 定义（含完整工作流指引）
-└── README.md / LICENSE / requirements.txt / pyproject.toml
+```bash
+# ASR model (Xiaomi sherpa-onnx streaming zipformer, zh+en, ~490 MB)
+mkdir -p models/sherpa
+curl -L -o - https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2 \
+  | tar -xj -C models/sherpa --strip-components=1
+
+# CLIP visual encoder (ONNX, ~600 MB)
+bash scripts/download_clip_onnx.sh
 ```
 
-## 三层压缩理念
+Model directories can be overridden with `VUS_SHERPA_MODELS` /
+`VUS_CLIP_MODELS`.
 
-| 层级 | 内容 | 数量级 | 用途 |
-|------|------|--------|------|
-| Tier 0 | 原始帧 | 30fps（13万帧） | 播放 |
-| Tier 1 | 快系统运动事件 | 逐帧 | 实时感知"有没有事发生" |
-| Tier 2 | 镜头级关键帧 | 1-2s/张（~1600张） | 精确时间定位、镜头切换 |
-| Tier 3 | **语义代表帧** | 30-60s/张（~60-150张） | **给 LLM 做内容理解** |
+> ⚠️ Without sherpa-onnx the subtitle channel falls back to **mock output —
+> placeholder text, not real transcription**. Never present mock subtitles as
+> real content.
 
-## 与 claude-real-video 对比（落地实测）
+## Quick start
 
-我们用 4 组可控测试视频（640x360@30fps，12s），对 [claude-real-video (crv)](https://github.com/davecap/claude-real-video) 与本 Skill 做了同一套产物下的速度与准确性对比。准确性指标：将时间轴切成 1s 桶、取桶首尾像素差分作为"该秒内容变化量"，超过 3% 视为有变化；覆盖率 = 被选中帧覆盖的有变化秒数占比。
+```bash
+# 1. Extract structured artifacts (keyframes + motion segments + subtitles)
+python -m vus.integrated_pipeline --video lecture.mp4 --output out/ --kf-hz 1.5
 
-| 测试 | 场景 | crv 帧   | crv 覆盖率 | crv 耗时 | 本 Skill 帧 | 本 Skill 覆盖率 | 本 Skill 耗时 |
-|------|------|---------|-----------|---------|------------|----------------|--------------|
-| aba   | A→B→A 场景切换 | 2   | —（无连续变化） | 1.63s | 2 | —（无连续变化） | 0.45s |
-| slow  | 全屏缓慢渐变 | 12  | 100%       | 1.68s | 6 | 100%       | 0.48s |
-| hue   | 纯色色相渐变 | 12  | 100%       | 1.62s | 6 | 100%       | 0.45s |
-| static| 静态画面+末尾突变 | 1   | **0%**      | 1.66s | 2 | **100%**   | 0.42s |
+# live stream variant
+python -m vus.integrated_pipeline --source rtsp --url rtsp://host/stream --output out/
 
-结论：
+# 2. Compress to semantic representative frames (Tier 3)
+python -m vus.select_representatives --keyframes out/keyframes \
+  --interval 60 --out representatives.json --report context.md
 
-- **准确性**：在 `static` 场景中，crv 只保留首帧、完全漏掉末尾（11s 处 Δ22.7%）的场景突变，覆盖率 0%；本 Skill 以 2 帧完整捕获（100%）。crv 的"密度下限"策略在信号稀疏时容易漏掉尾部关键变化。
-- **精简度**：`slow`/`hue` 上 crv 每 1s 选 1 帧（12 帧），本 Skill 用时间分桶 + 像素差分去重只需 6 帧即达相同覆盖率，冗余减半，LLM 消费更省 token。
-- **速度**：本 Skill 端到端约 **0.42-0.48s**，crv 约 **1.62-1.68s**，快约 **3.5 倍**。
+# multi-speaker roundtables? keep per-bucket diversity:
+python -m vus.select_representatives --keyframes out/keyframes \
+  --interval 60 --k 3 --out representatives.json
 
-复现（在 `bench/` 目录下）：`python gen_bench.py` 生成 4 组测试视频，`python run_bench.py` 跑双方管线，`python land_compare.py` 输出以上对比表。
+# 3. Feed representative frames + context.md + aligned_output.json to a
+#    multimodal LLM for understanding / report generation
+```
 
-### 指标局限（重要）
+Reading `representatives.json` and the aligned subtitles is all a multimodal
+model needs to produce a lecture notes / plot summary / scene report.
 
-上表的"覆盖率"是**像素差分定义**的（1s 桶首尾像素差分 >3% 记为有变化秒）——这把尺子与本 Skill 的选帧算法**同构**（都基于像素差分），对比天然偏向自己；对"语义相同但像素不同"的内容（纯色抖动、噪点、热扰）它会伪造大量"变化秒"，对"语义已切换但画面相似"的内容（同机位换话题）则失明。`static` 场景的结论（crv 漏掉末尾突变）不依赖这把尺子、仍然成立；其余场景的速度与精简度结论也独立于覆盖率定义。
+## How it works
 
-W3 起引入**语义级评估**打破该偏差：按语义场景切段做 GT，用"语义覆盖率 / 冗余度 / 场景保真"打分（协议见 [`bench/semantic_eval/PROTOCOL.md`](bench/semantic_eval/PROTOCOL.md)，工具 `eval_semantic.py` / `annotate_vlm.py`）。合成对照实验（`python bench/semantic_eval/gen_synthetic_gt.py`，纯色 A→B→纹路 C→纯色 A'）实证了旧尺子的误判：48s 视频被判出 24 个"有变化秒"（75% 是纯场景内部变化，语义误报），语义上完美的 4 帧选择在该尺子下只得 16.7%，而在语义尺子下满分（覆盖率 100%、冗余度 1.00）。
+| Tier | Content | Scale | Purpose |
+|------|---------|-------|---------|
+| 0 | raw frames | 30 fps (10⁵ frames) | playback |
+| 1 | fast-system motion events | per frame | "is anything happening" |
+| 2 | shot-level keyframes | 1–2 s apart | timeline anchoring |
+| 3 | **semantic representative frames** | 30–60 s apart | **LLM understanding** |
 
-## 作为 AI Skill 使用
+The fast system runs every frame on a downscaled grayscale image (frame
+difference + semantic gate, ~3% of budget). The slow system samples at low
+frequency and only when the fast system reports content, scoring candidates
+with pixel difference, pHash and histogram — plus **gradual-drift
+confirmation** for content that evolves slowly (slide annotations, camera
+pan), which perceptual hashes are blind to.
 
-本目录同时是 [TRAE](https://trae.ai) 兼容的 Skill。将本仓库放入 skills 目录后，AI 会在用户要求"理解这个视频 / 分析视频内容 / 提取视频信息"时自动调用 `SKILL.md` 中的工作流。
+## Performance
 
-## 致谢与版权（重要）
+### Real world (120-min 1080p25 live course, 180k frames)
 
-本项目的声音链（ASR）基于 **sherpa-onnx** 流式语音识别引擎，该引擎由 **Xiaomi（小米）** 开源维护。使用本项目前请务必周知：
+| Metric | Result |
+|--------|--------|
+| Processing rate | 147.7 fps (**5.9× realtime**) |
+| Keyframes | 41 (35 gradual-drift + 5 scene-change), full coverage 0→7150 s |
+| ASR | 3,505 segments, ~33k chars, RTF 0.08 (runs in parallel) |
+| Memory | stable, ~225 MB after ASR model release |
 
-- **上游项目**：本仓库的 `scripts/asr_sherpa.py` 依赖 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)（k2-fsa / Xiaomi 维护的流式中英双语 ASR 引擎）。
-- **模型权重**：默认引用的流式模型为 `sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20`，其权重与使用条款遵循 sherpa-onnx 上游的 [Apache-2.0 开源协议](https://github.com/k2-fsa/sherpa-onnx) 及模型自身发布说明。
-- **本仓库仅封装**：本项目仅在 `asr_sherpa.py` 中对 sherpa-onnx 做了轻量封装（抽音频 → 流式解码 → 增量落盘），未修改其核心逻辑。任何对 sherpa-onnx 的二次分发、商用，请自行遵守其上游许可证与模型条款。
-- **fallback 说明**：未安装 sherpa-onnx 时，ASR 自动退化为 mock fallback（仅占位，不产出真实字幕），不影响画面链与代表帧核心功能。
+### Synthetic realtime rates (low-spec 2-core Windows)
 
-## 使用注意事项
+| Spec | Rate | Realtime factor |
+|------|------|-----------------|
+| 720p50 | 247 fps | 4.9× |
+| 1080p30 | 78 fps | 2.6× |
 
-为获得正确的内容理解结果，请务必遵守以下约束：
+### vs. claude-real-video (crv)
 
-1. **必须使用具备视觉能力的多模态模型**。本 Skill 的内容理解依赖"读取代表帧图片"（Tier 3 语义代表帧 + 关键帧），因此下游 LLM **必须支持图像输入**（如带视觉的多模态模型）。若使用纯文本模型（如部分仅文本的 API），将无法读取画面，内容理解会完全失效。这是本项目最关键的软性前提。
-2. **ASR 为可选项**。字幕（ASR）用于补充声音信息，但画面理解不依赖它。若未安装 sherpa-onnx 或不具备音频条件，画面链与代表帧理解仍可正常工作。
-3. **硬件与实时性**。实时率（实测 720p50 达 441fps、1080p30 达 202fps，75 分钟视频 221fps）基于当前 CPU 环境测得；在资源受限的嵌入式设备上，请通过 `--fast-scale`、`--kf-hz` 调整预算。
-4. **运行方式**。管线应作为**常驻进程/线程**运行（如机器人实时流场景），而非一次性后台任务——后台进程可能被宿主回收导致中断（详见下方"已知经验"）。
+Controlled comparison on 4 synthetic 12 s clips (details and repro in
+`bench/`): on the `static` clip crv missed the end-of-video change entirely
+(0% coverage) while vus captured it with 2 frames; on slow/hue ramps vus
+reached the same coverage with half the frames; end-to-end ~3.5× faster.
 
-## 硬件资源需求（实测）
+> Note: the coverage metric in that table is pixel-difference-defined — the
+> same signal vus selects frames with, so it structurally favors vus (the
+> `static` result stands on its own). A semantic-level evaluation protocol
+> (annotation guide + coverage/redundancy metrics) lives in
+> `bench/semantic_eval/`.
 
-在 2 核 / 4GB 环境、真实 75 分钟 1080p 视频（`full75.mp4`，240MB）上实测各环节资源占用：
+## Repository layout
 
-| 环节 | 峰值内存 RSS | CPU 核利用率 | 备注 |
-|------|-------------|-------------|------|
-| 实时画面链（逐帧） | **~166 MB** | **~1.2 核** | 283 fps @ 1080p30，超实时 9.4× |
-| 全管线（画面链 + 后台 ASR） | ~166 MB | ~1.2 核 | ASR 线程开销可忽略 |
-| Tier3 语义代表帧选择（离线） | ~317 MB | — | 需读入全部关键帧做差分，6.5s/75min |
+```
+vus/                       installable core (pip install -e .)
+  smart_pipeline.py        fast/slow dual-system vision chain
+  integrated_pipeline.py   three-channel orchestration (vision + ASR + align)
+  asr_sherpa.py            streaming ASR (sherpa-onnx / explicit fallback)
+  select_representatives.py Tier-3 semantic frame selection (--k/--adaptive/--clip)
+  source.py                FileSource / CameraSource / RTSPSource
+  clip_onnx.py             CLIP ViT-B/32 via onnxruntime (no torch)
+  ocr_channel.py           optional OCR channel
+  io_utils.py, pathsafe.py safe output writing (traversal-guarded)
+scripts/                   legacy entry points (thin shims, still work)
+apps/anti_drone/           anti-drone detection stack built on the core
+devices/                   PTZ / localization / multi-camera handover
+bench/                     crv comparison + semantic evaluation protocol
+tests/                     96 pytest cases + end-to-end smoke
+```
 
-**推荐配置**：
+## Use as an agent skill
 
-- **最低配置**：CPU 2 核、内存 **512 MB**（画面链仅用 ~1.2 核 + ~166MB，实时性充分）。
-- **推荐配置**：CPU 4 核、内存 **2 GB**（为 Tier3 离线选择 317MB + sherpa-onnx 流式模型 300-500MB 留余量，且不挤占实时画面链）。
-- 本架构为资源受限设备（机器人/嵌入式）设计，2 核 / 512MB-2GB 即可实时运行。真正吃内存的是 Tier3 离线选择与 ASR 模型，二者均不在逐帧实时路径上。
+This repository is a ready-to-drop agent skill: copy it into your agent's
+skills directory (e.g. `~/.agents/skills/video-understanding-skill/`) and the
+bundled `SKILL.md` teaches the agent when and how to run the pipeline —
+including model setup and the mock-subtitle pitfall. No installation
+required: the legacy `scripts/` entries resolve paths on their own.
 
-## 已知经验（踩坑记录）
+## Hardware
 
-在真实长视频（75 分钟普法节目，135,744 帧）实测中确认：
+Measured on a 2-core / 4 GB box: realtime vision chain ~1.2 cores + 166 MB
+RSS; Tier-3 offline selection ~317 MB (bounded memory); streaming ASR adds
+300–500 MB while decoding. 512 MB RAM is enough for the vision chain alone;
+2 GB recommended with ASR.
 
-- **处理速率**：画面链稳定 221.6fps，超实时 7.4 倍；端到端 612 秒处理完 75 分钟视频。
-- **三层压缩**：1549 张镜头级关键帧 → 70 张语义代表帧（压缩到 4.5%），人工抽帧验证内容连贯、覆盖充分、无漏帧。
-- **后台进程陷阱**：用 `nohup ... &` 后台启动时，进程会被运行环境回收导致"假死"（日志停在某帧、进程消失、无报错）。应使用前台常驻进程或 `blocking=false` 方式运行。
+## Acknowledgments
+
+- [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) — streaming ASR engine,
+  maintained by Xiaomi (k2-fsa). This repo only wraps it in
+  `vus/asr_sherpa.py`; the bundled model
+  `sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20` follows the
+  upstream Apache-2.0 license and its own model terms. Any redistribution or
+  commercial use of the engine or models must comply with upstream terms.
+- [openai/CLIP](https://github.com/openai/CLIP) ViT-B/32 — semantic encoder
+  (ONNX export).
+- [claude-real-video](https://github.com/davecap/claude-real-video) —
+  comparison baseline in `bench/`.
 
 ## License
 
