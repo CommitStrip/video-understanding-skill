@@ -77,6 +77,43 @@ def test_drift_no_storm_after_acceptance():
     assert len(drifts) == 1, f"稳态内容只应发 1 帧, 实际 {len(drifts)}"
 
 
+def test_drift_oscillation_around_threshold():
+    """实战缺口形态：超阈采样被低于阈值的采样打断（分数贴着阈值震荡）。
+
+    严格连续计数会永远凑不满 3 连检（365s 零发帧的根因）；
+    滑窗计数（5 检 ≥3）应采纳。
+    """
+    pipe = SmartPipeline()
+    frames = [_TEX.copy()] * 30
+    for i in range(300):  # 10s：漂移帧/静止帧交替，检查得分 12/0 交替
+        frames.append(drift_frame(48) if i % 2 == 0 else _TEX.copy())
+    feed(pipe, frames)
+    drifts = [k for k in kfs(pipe) if k.get("reason") == "gradual_drift"]
+    assert len(drifts) >= 1, "震荡漂移应被滑窗计数采纳"
+
+
+def test_soft_drift_sustained_subthreshold():
+    """实战缺口根因形态：采纳重置基准后，多页课件的持续单帧增量只剩硬阈的
+    0.6-1.0 倍（实测 p50=9.0 vs 阈10，9080 次检查 0 次超阈）。
+    软车道：均分持续超软阈占满时间窗即采纳。"""
+    pipe = SmartPipeline()
+    frames = [_TEX.copy()] * 30
+    frames += [drift_frame(32)] * 960   # 32*0.25=8.0，介于软阈6与硬阈10之间，持续 32s
+    feed(pipe, frames)
+    soft = [k for k in kfs(pipe)
+            if k.get("reason") == "gradual_drift" and k.get("score", 99) < 10]
+    assert soft, "持续亚阈值漂移应被软车道采纳"
+    assert soft[0].get("soft_mean", 0) > 6
+
+
+def test_soft_drift_static_never_fires():
+    """静态内容均分远低于软阈，软车道永不触发。"""
+    pipe = SmartPipeline()
+    frames = [_TEX.copy()] * 1050  # 35s 静止
+    feed(pipe, frames)
+    assert [k for k in kfs(pipe) if k.get("reason") == "gradual_drift"] == []
+
+
 def test_drift_recovery_after_new_content():
     """采纳后内容继续演化：streak 重新累计，能再次发帧。"""
     pipe = SmartPipeline()

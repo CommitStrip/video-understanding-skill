@@ -51,10 +51,17 @@ class SmartPipeline:
         self.phash_threshold = cfg.get('phash_threshold', 12)              # pHash 距离阈值
         self.hist_threshold = cfg.get('hist_threshold', 0.5)               # 直方图相关阈值
         self.dedup_threshold = cfg.get('dedup_threshold', 5)               # 去重 hamming 距离
-        # 渐变漂移采纳：第一闸(像素差分)连续 N 次超阈即发帧，治"渐变演化失明"
+        # 渐变漂移采纳：两条车道，治"渐变演化失明"
         # （直播课程/讲座的课件批注推进：像素差分看得见，pHash/直方图看不见）。
+        #   硬车道：超硬阈(keyframe_diff)在滑窗内累计达 confirm 次——单帧突变式漂移
+        #   软车道：软阈(硬阈×soft_ratio)持续占满 soft_window_s 时间窗——
+        #     实测根因：采纳即重置基准，多页课件的"单帧增量"只剩硬阈的 0.9 倍
+        #     （p50=9.0 vs 阈10，9080 次检查 0 次超阈），唯有时间窗均值能看见
         # 0 = 关闭，还原纯双闸旧行为
         self.drift_confirm_checks = cfg.get('drift_confirm_checks', 3)
+        self.drift_window_checks = cfg.get('drift_window_checks', 5)
+        self.drift_soft_ratio = cfg.get('drift_soft_ratio', 0.6)
+        self.drift_soft_window_s = cfg.get('drift_soft_window_s', 30.0)
 
         # === 快系统状态 ===
         self.prev_small = None
@@ -71,7 +78,9 @@ class SmartPipeline:
         self.prev_hist = None
         self.kf_hashes = []
         self.last_keyframe_t = -1.0
-        self._drift_streak = 0          # 第一闸连续超阈计数（渐变漂移采纳用）
+        self._drift_hist = deque(maxlen=max(self.drift_window_checks,
+                                            self.drift_confirm_checks))
+        self._soft_checks = deque()    # (timestamp, score)：软车道时间窗
 
         # === 输出（流式累积）===
         # max_events: 事件内存上限（长视频/长直播防泄漏，W1 修复：原 list 无限增长，
@@ -257,9 +266,42 @@ class SmartPipeline:
 
         diff = cv2.absdiff(self.prev_kf_gray, gray)
         score = float(np.mean(diff))
-        drifting = score > self.keyframe_diff
-        self._drift_streak = self._drift_streak + 1 if drifting else 0
-        if not drifting:
+
+        # 软车道：维护时间窗内的检查得分，均分持续超过软阈即视为持续漂移
+        self._soft_checks.append((timestamp, score))
+        soft_floor = self.keyframe_diff * self.drift_soft_ratio
+        while self._soft_checks and timestamp - self._soft_checks[0][0] > self.drift_soft_window_s:
+            self._soft_checks.popleft()
+        soft_mean = (sum(s for _t, s in self._soft_checks) / len(self._soft_checks)
+                     if self._soft_checks else 0.0)
+        soft_sustained = (len(self._soft_checks) >= 2
+                          and soft_mean > soft_floor)
+
+        self._drift_hist.append(1 if score > self.keyframe_diff else 0)
+        if score <= self.keyframe_diff:
+            by_soft = (soft_sustained and self.drift_confirm_checks > 0)
+            if by_soft:
+                self._drift_hist.clear()
+                self._soft_checks.clear()
+                self.prev_kf_gray = gray.copy()
+                self.prev_phash = self._compute_phash(gray)
+                self.prev_hist = self._compute_hist(color)
+                self.kf_hashes.append(self.prev_phash)
+                self.last_keyframe_t = timestamp
+                self.keyframes.append({
+                    "t": round(timestamp, 3),
+                    "frame_idx": self.frame_count,
+                    "reason": "gradual_drift",
+                    "score": round(score, 2),
+                    "soft_mean": round(soft_mean, 2)
+                })
+                return {
+                    "type": "keyframe",
+                    "t": round(timestamp, 3),
+                    "reason": "gradual_drift",
+                    "score": round(score, 2),
+                    "soft_mean": round(soft_mean, 2)
+                }
             return None
 
         phash = self._compute_phash(gray)
@@ -277,18 +319,20 @@ class SmartPipeline:
                 break
 
         # 采纳条件：突变场景（pHash/直方图证据）立即采纳，仍查 pHash 去重；
-        # 渐变漂移（pHash/直方图不可见但像素差分持续超阈）累计 N 次检查后采纳。
-        # 漂移路径不查 pHash 去重——pHash 对该类内容失明（距离恒 0-7），
-        # 用它否决等于复刻本 bug；score 本身就是对上一采纳帧的像素级新颖性证明，
-        # 且 3 连检要求把发帧率天然限制在 ≤1 帧/6 秒
+        # 渐变漂移（pHash/直方图不可见但像素差分超阈）按滑窗计数采纳——
+        # 漂移路径不查 pHash 去重（pHash 对该类内容失明，用它否决等于复刻 bug）；
+        # score 本身就是对上一采纳帧的像素级新颖性证明，滑窗把发帧率
+        # 天然限制在约 ≤1 帧/(window-confirm+1)*检查间隔
         by_drift = (not is_new_scene
                     and self.drift_confirm_checks > 0
-                    and self._drift_streak >= self.drift_confirm_checks)
+                    and sum(self._drift_hist) >= self.drift_confirm_checks)
         if is_new_scene and not is_duplicate:
-            self._drift_streak = 0
+            self._drift_hist.clear()
+            self._soft_checks.clear()
             reason = "scene_change"
         elif by_drift:
-            self._drift_streak = 0
+            self._drift_hist.clear()
+            self._soft_checks.clear()
             reason = "gradual_drift"
         else:
             return None
