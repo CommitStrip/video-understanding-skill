@@ -35,3 +35,6 @@ vus.egg-info/
 # W3: semantic_eval 产物（合成实验输出与标注脚手架）
 bench/semantic_eval/out_*/
 bench/semantic_eval/annotations/
+
+# 本地模型权重（下载脚本获取，不入库）
+models/
