@@ -1,6 +1,6 @@
 """bench.run_bench 的 crv frames.json 解析测试（离线，不装 crv）。
 
-背景（实战 bug，Trae 会话独立发现）：crv 0.10+ 输出
+背景（实战 bug，对比基准复跑时发现）：crv 0.10+ 输出
 {"frames": [{"timestamp_sec": ...}, ...]}，而 run_bench.py 旧代码
 假定裸列表 + frames_json_path 属性，导致竞品帧数恒为 0、对比失真。
 """
