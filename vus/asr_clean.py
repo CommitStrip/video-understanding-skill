@@ -72,3 +72,35 @@ def clean_asr_segments(segments):
 def filter_hallucinations(segments):
     """返回剔除幻觉段后的列表（是否剔除由宿主决定，默认保留在产物里）。"""
     return [s for s in segments if not s.get("hallucination")]
+
+
+class RollingCleaner:
+    """clean_asr_segments 的增量版（W8 直播链路）：跨 feed 保持相邻去重状态。
+
+    直播 ASR 段是陆续到达的，批式 clean_asr_segments 无法直接使用——
+    相邻去重需要记住上一条已发射文本。逐段清洗语义与批式完全一致：
+    空段剔除 / 连叠折叠（保留 raw_text）/ 相邻重复合并 / 幻觉标记。
+    """
+
+    def __init__(self):
+        self._last_text = None  # 上一条已发射段的清洗后文本（相邻去重基准）
+
+    def feed(self, segments):
+        """清洗一批新到达的 ASR 段，返回可发射的段列表（可能为空）。"""
+        out = []
+        for seg in segments:
+            text, changed = clean_text(seg.get("text", ""))
+            if not text:
+                continue
+            if self._last_text is not None and self._last_text == text:
+                continue
+            entry = dict(seg)
+            entry["text"] = text
+            if changed:
+                entry["raw_text"] = seg.get("text", "")
+                entry["cleaned"] = True
+            if _is_likely_hallucination(text):
+                entry["hallucination"] = True
+            self._last_text = text
+            out.append(entry)
+        return out

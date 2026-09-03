@@ -8,6 +8,7 @@ io_utils.py - 安全落盘写（JSON / 文本）
 """
 
 import json
+import os
 from pathlib import Path
 
 
@@ -31,4 +32,33 @@ def write_text(base_dir, name, text):
     if not path:
         raise ValueError(f"输出路径不允许包含 '..' 片段: {base_dir}/{name}")
     Path(path).write_text(text, encoding='utf-8')
+    return path
+
+
+def _atomic_write(path, text):
+    """先写同目录临时文件再 os.replace 原子替换（滚动文件用：读者永远看不到半截）。
+
+    W8：live_state.json / live_context.md 会被 SSE 服务与外部 agent 高频读取，
+    非原子写会暴露中间态。os.replace 在同一文件系统内是原子操作。
+    """
+    tmp = str(path) + '.tmp'
+    Path(tmp).write_text(text, encoding='utf-8')
+    os.replace(tmp, str(path))
+
+
+def write_json_atomic(base_dir, name, data):
+    """write_json 的原子版（W8 滚动落盘）。"""
+    path = safe_output_path(base_dir.rstrip('/\\') + '/' + name)
+    if not path:
+        raise ValueError(f"输出路径不允许包含 '..' 片段: {base_dir}/{name}")
+    _atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2))
+    return path
+
+
+def write_text_atomic(base_dir, name, text):
+    """write_text 的原子版（W8 滚动落盘）。"""
+    path = safe_output_path(base_dir.rstrip('/\\') + '/' + name)
+    if not path:
+        raise ValueError(f"输出路径不允许包含 '..' 片段: {base_dir}/{name}")
+    _atomic_write(path, text)
     return path
