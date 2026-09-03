@@ -1,90 +1,75 @@
 ---
-name: "video-understanding"
-description: "从视频中提取结构化语义（关键帧+运动段+ASR字幕），分层压缩为语义代表帧，供 LLM 做内容理解并输出报告。当用户要求'理解这个视频''分析视频内容''提取视频信息'或给视频生成剧情/字幕/场景摘要时调用。"
+name: "video-understanding-skill"
+description: "把视频（尤其直播课程、讲座、长视频）变成结构化的内容理解产物：语义代表帧 + 时间轴对齐的真 ASR 字幕 + 运动段，供 LLM 输出课程讲义/剧情摘要/场景分析报告。当用户要求'理解这个视频''分析视频内容''提取视频信息''转写字幕''抽关键帧''做课程讲义'，或给出 RTSP 实时流/摄像头画面要做实时理解时调用——即使没明说'视频理解'。"
 ---
 
 # Video Understanding（视频内容理解）
 
-把一段视频变成一份**结构化、可被 LLM 高效消费的内容理解产物**。核心价值：把 30fps 的 13 万帧压缩成几十张语义代表帧 + 时间轴对齐的字幕 + 运动段，让理解既不冗余也不漏关键信息。
+把一段视频变成**结构化、可被 LLM 高效消费的内容理解产物**：把 30fps 的十几万帧压缩成几十张语义代表帧 + 时间轴对齐字幕 + 运动段。已实测 1080p 直播课程 120 分钟：147.7fps 处理（5.9× 实时）、41 关键帧、3505 段真实中文字幕。
 
-## 何时使用
+## 前置条件
 
-- 用户要求"理解这个视频 / 分析视频内容 / 视频讲了什么 / 提取视频信息"。
-- 需要为视频生成剧情摘要、场景列表、人物表、话题切换、字幕对齐等。
-- 需要把长视频（几十分钟到几小时）变成简洁的语义框架。
-
-## 三层压缩理念（必读）
-
-理解一个视频前，先理解为什么不能直接用原始帧或管线原始关键帧：
-
-| 层级 | 内容 | 数量级 | 用途 |
-|------|------|--------|------|
-| Tier 0 | 原始帧 | 30fps（13万帧） | 播放 |
-| Tier 1 | 快系统运动事件 | 逐帧 | 实时感知"有没有事发生" |
-| Tier 2 | 镜头级关键帧 | 1-2s 一张（~1600张） | 精确时间定位、镜头切换 |
-| Tier 3 | **语义代表帧** | 30-60s 一张（~60-150张） | **给 LLM 做内容理解** |
-
-**关键经验**：Tier 2 的镜头级关键帧在 LLM 看来高度冗余（例如圆桌辩论节目中，7 人近景交替切换，但语义上都是"辩论进行中"）。真实案例中，75 分钟视频产出 1609 张关键帧，LLM 只抽样 15 张就理解了全部内容。因此**给 LLM 消费前，必须先用 `select_representatives.py` 压缩到 Tier 3**，同时保留时间锚点保证不丢稀疏区。
+1. 依赖：`pip install -e .`（或直接跑——`scripts/` 下的旧命令入口内置了路径兜底，无需安装）。必需 `opencv-python`、`numpy`；ffmpeg 用于抽音频。
+2. **真字幕**（强烈建议）：`pip install sherpa-onnx`，模型下载到 `models/sherpa/`：
+   ```bash
+   curl -L -o - https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2 | tar -xj -C models/sherpa --strip-components=1
+   ```
+   模型目录可用环境变量 `VUS_SHERPA_MODELS` 指定。
+   🔴 **警告：未装 sherpa-onnx 时字幕是"mock 占位假文本"（固定提示语，非真实内容）——禁止把 mock 字幕当作真实转写交付给用户**，必须在报告里注明字幕缺失。
+3. 可选增强：`pip install -e ".[clip]"` + `bash scripts/download_clip_onnx.sh`（CLIP 语义选帧，权重目录 `VUS_CLIP_MODELS`）；`pip install -e ".[ocr]"` + 管线 `--ocr`（幻灯片文字提取）。
 
 ## 工作流
 
 ### 第 1 步：跑管线提取结构化产物
 
 ```bash
-python scripts/integrated_pipeline.py --video <视频路径> --output <输出目录>
+python -m vus.integrated_pipeline --video <视频路径> --output <输出目录> --kf-hz 1.5
+# 直播/RTSP 实时流变体：
+python -m vus.integrated_pipeline --source rtsp --url rtsp://主机/流 --output <输出目录>
 ```
 
-产出：
-- `<输出目录>/keyframes/*.jpg` —— 镜头级关键帧
-- `<输出目录>/pipeline_results.json` —— 关键帧时间表 + 运动段 + 摘要
-- `<输出目录>/aligned_output.json` —— 时间轴对齐的字幕（ASR 段）
-
-> 若已经存在管线产物（如只给一个含 `keyframes/` 的目录），可跳过本步。
+产出：`<输出目录>/keyframes/`（镜头级关键帧）、`pipeline_results.json`（时间表+运动段）、`aligned_output.json`（对齐字幕）。已有产物时可跳过本步。
 
 ### 第 2 步：压缩为语义代表帧（Tier 3）
 
 ```bash
-python scripts/select_representatives.py \
-  --keyframes <输出目录>/keyframes \
-  --interval 60 \
-  --out representatives.json \
-  --report context.md
+python -m vus.select_representatives --keyframes <输出目录>/keyframes \
+  --interval 60 --out representatives.json --report context.md
 ```
 
-- `--interval 60`：每 60 秒保留 1 张代表帧（按需调整，10 分钟短视频可设 20-30）。
-- 脚本同时做时间分桶 + 像素差分去重 + 时间完整性优先保留（对慢变化/纯色色相敏感，优于 pHash）。
+参数选择：多人近景轮换（圆桌/访谈）加 `--k 3` 每桶保留 3 张互不冗余的代表帧；内容单调的监控流加 `--adaptive` 自动放宽；语义增强加 `--clip`。
 
-### 第 3 步：读取代表帧做内容理解
+### 第 3 步：读代表帧做内容理解
 
-用 Read 工具逐一（或按需批量）读取 `representatives.json` 里的代表帧图片，结合 `context.md` 与 `aligned_output.json` 理解：
+用 Read 工具读取 `representatives.json` 里的代表帧图片，结合 `context.md` 与 `aligned_output.json`：
 
-1. **开场与结尾**：务必读首帧、尾帧，锁定"节目类型 + 案件/主题 + 最终结论"。
-2. **场景构成**：通过代表帧的视觉差异识别场景类型（圆桌、访谈、投影、外景等）。
-3. **人物与角色**：从字幕 + 画面识别说话人、角色、立场。
-4. **话题/时间线**：结合运动段密度与代表帧变化，划分视频结构段落。
+1. **首帧与尾帧必读**——锁定节目类型 + 主题 + 最终结论
+2. 场景构成、人物角色（画面 + 字幕交叉验证）
+3. 话题时间线（运动段密度 + 代表帧变化 + 字幕关键词）
 
-### 第 4 步：输出理解报告
+### 第 4 步：输出结构化报告
 
-把理解结果整理为结构化产物：
-- 基本信息（时长/分辨率/类型）
-- 内容概要 / 案件或主题
-- 人物与角色表
-- 核心争议 / 关键信息
-- 时间线结构
-- 场景构成分析
+按用户偏好交付（默认 HTML，可 Markdown）。最小结构示例：
 
-交付格式按用户偏好：默认 HTML 报告，也可输出 Markdown / 直接对话总结。
-
-## 冒烟测试验证
-
-```bash
-# 用合成测试视频验证管线可跑通
-python scripts/validate_realtime.py   # 生成 720p50/1080p30 测试视频并跑实时率验证
-python scripts/select_representatives.py --keyframes <任一含jpg的目录>
+```markdown
+# 《视频标题》内容理解报告
+## 基本信息
+时长 120 分钟 · 1080p · 直播课程（高中地理）
+## 内容概要
+本讲围绕雅鲁藏布江与长江的水文特征展开……
+## 时间线
+| 时间 | 内容 | 依据 |
+|------|------|------|
+| 00:00-22:00 | 课程引入：雅鲁藏布江 | 代表帧 rep_00 + 字幕 t=60s"咱们今天晚上的主要内容" |
+## 关键截图
+- rep_03（t=823s）：课件第 2 页板书
 ```
+
+每条结论都应引用代表帧文件名或字幕时间戳作为依据。
 
 ## 注意事项
 
-- 依赖：`opencv-python`（必需）、`numpy`、`ffmpeg`（抽音频）、`sherpa-onnx`（可选，ASR，缺失时走 mock fallback）。
-- 代表帧数量是"内容理解的下限安全值"：60-80 帧足以可靠覆盖长视频的所有关键节点，若预算紧张可放宽到 30 帧。
-- 不要用镜头级关键帧直接喂 LLM（冗余），也不要只有 15 帧均匀抽样（可能漏人物/场景切换）。
+- **必须用多模态模型**读代表帧，纯文本模型无法完成画面理解。
+- 内容缓慢演化的视频（课件批注推进等）由渐变漂移检测自动覆盖，无需调参。
+- 低配环境遇 OpenBLAS 内存报错：设 `OPENBLAS_NUM_THREADS=1`。
+- 验证安装可用 `python -m vus.validate_realtime --out ./output/rt_check`（可选）。
