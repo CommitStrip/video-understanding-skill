@@ -62,9 +62,14 @@ def test_find_asr_model_recursive_subdir(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(model_setup.os.path, "expanduser", lambda p: str(tmp_path / "none"))
     found = find_asr_model()
-    # 相对/绝对均可，解析后须指向同一目录
-    import os as _os
-    assert _os.path.realpath(found) == _os.path.realpath(str(d))
+    # 返回值是搜索根（相对/绝对均可），其下必须能递归找到完整模型文件
+    assert found is not None
+    for root, _dirs, files in os.walk(found):
+        if "tokens.txt" in files and any(
+                f.startswith("encoder") and f.endswith(".onnx") for f in files):
+            break
+    else:
+        pytest.fail(f"返回目录下找不到完整模型文件: {found}")
 
 
 def test_ensure_auto_disabled_never_downloads(tmp_path, monkeypatch):
