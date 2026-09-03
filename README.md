@@ -148,8 +148,6 @@ vus/                       installable core (pip install -e .)
   ocr_channel.py           optional OCR channel
   io_utils.py, pathsafe.py safe output writing (traversal-guarded)
 scripts/                   legacy entry points (thin shims, still work)
-apps/anti_drone/           anti-drone detection stack built on the core
-devices/                   PTZ / localization / multi-camera handover
 bench/                     crv comparison + semantic evaluation protocol
 tests/                     96 pytest cases + end-to-end smoke
 ```

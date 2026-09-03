@@ -116,8 +116,6 @@ vus/                       可安装核心（pip install -e .）
   ocr_channel.py           可选 OCR 通道
   io_utils.py, pathsafe.py 安全落盘写（防路径穿越）
 scripts/                   旧命令入口（薄壳，继续可用）
-apps/anti_drone/           构建在核心之上的反无人机检测栈
-devices/                   云台 / 定位 / 多机协同
 bench/                     crv 对比 + 语义级评估协议
 tests/                     96 个 pytest 用例 + 端到端冒烟
 ```
