@@ -20,6 +20,13 @@ ASR_MODEL_URL = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
     "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2"
 )
+# 离线识别模型（SenseVoice int8：非流式全上下文，中文专名/可读性显著优于流式，
+# 对 BGM 鲁棒；166MB，用于文件转写默认路径）
+OFFLINE_ASR_MODEL_URL = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+    "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2"
+)
+OFFLINE_ASR_SUBDIR = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09"
 # 下载允许的官方主机白名单（含 release 资产重定向目标）
 _ALLOWED_HOSTS = {"github.com", "objects.githubusercontent.com", "codeload.github.com"}
 
@@ -105,3 +112,76 @@ def ensure_asr_model(model_dir=None, auto=None):
     if not auto:
         return None
     return download_asr_model()
+
+
+# ==================== 离线识别模型（SenseVoice int8） ====================
+
+def offline_asr_dir():
+    """离线模型目录：VUS_OFFLINE_ASR_MODELS > ./models/offline_asr。"""
+    return Path(os.environ.get("VUS_OFFLINE_ASR_MODELS") or "./models/offline_asr")
+
+
+def _dir_has_complete_model(d):
+    """目录内（含子目录）应能找到 tokens.txt + 任一 model*.onnx。"""
+    for root, _dirs, files in os.walk(d):
+        names = set(files)
+        if "tokens.txt" in names and any(f.startswith("model") and f.endswith(".onnx")
+                                         for f in files):
+            return True
+    return False
+
+
+def find_offline_asr_model(model_dir=None):
+    """查找离线识别模型**完整**就位的目录，找到返回路径字符串，否则 None。"""
+    candidates = [
+        model_dir,
+        os.environ.get("VUS_OFFLINE_ASR_MODELS"),
+        str(offline_asr_dir()),
+        str(offline_asr_dir() / OFFLINE_ASR_SUBDIR),
+    ]
+    for c in candidates:
+        if c and os.path.isdir(c) and _dir_has_complete_model(c):
+            return c
+    return None
+
+
+def download_offline_asr_model(dest_dir=None):
+    """经系统 curl 下载 SenseVoice 离线模型并解压（约 166MB）。
+
+    返回模型目录字符串；失败打印原因返回 None。
+    """
+    _validate_url(OFFLINE_ASR_MODEL_URL)
+    dest = Path(dest_dir) if dest_dir else offline_asr_dir()
+    dest.mkdir(parents=True, exist_ok=True)
+    archive = str(dest) + "/offline-asr.tar.bz2"
+    print("[ASR] 离线模型未找到，开始自动下载（约 166MB，一次性）")
+    try:
+        subprocess.run(
+            ["curl", "-L", "--fail", "--retry", "3",
+             "-o", archive, OFFLINE_ASR_MODEL_URL],
+            check=True,
+        )
+        print("[ASR] 下载完成，解压中…")
+        with tarfile.open(archive, "r:bz2") as tf:
+            tf.extractall(dest, filter="data")
+        Path(archive).unlink()
+        sub = dest / OFFLINE_ASR_SUBDIR
+        return str(sub if sub.is_dir() else dest)
+    except Exception as e:
+        print(f"[ASR] 离线模型自动下载失败: {e}")
+        print("[ASR] 可手动下载解压到 models/offline_asr/，或设 VUS_ASR_AUTO_DOWNLOAD=0 跳过")
+        if Path(archive).exists():
+            Path(archive).unlink()
+        return None
+
+
+def ensure_offline_asr_model(model_dir=None, auto=None):
+    """确保离线识别模型就位：已存在返回目录；缺失按默认策略自动下载。"""
+    found = find_offline_asr_model(model_dir)
+    if found:
+        return found
+    if auto is None:
+        auto = os.environ.get("VUS_ASR_AUTO_DOWNLOAD", "1").lower() not in ("0", "false", "no")
+    if not auto:
+        return None
+    return download_offline_asr_model()

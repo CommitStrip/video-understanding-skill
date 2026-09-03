@@ -408,6 +408,11 @@ def main():
                     help="代表帧数量上限: 自动推算 interval 并迭代校正(最多5轮), "
                          "LLM 消费场景推荐 --max-reps 60 替代裸调 --interval; "
                          "与 --interval 并存时覆盖初始值")
+    ap.add_argument("--llm-export", default=None, metavar="DIR",
+                    help="LLM 友好导出目录: 代表帧等比缩放到 --llm-max-width 宽度, "
+                         "并生成 3x3 联系表与 token 估算（借鉴 crv 的 token 成本设计）")
+    ap.add_argument("--llm-max-width", type=int, default=640,
+                    help="LLM 导出图的宽度上限(默认 640px)")
     ap.add_argument("--out", default=None, help="输出代表帧 JSON 路径")
     ap.add_argument("--report", default=None, help="输出 LLM 上下文 Markdown 路径")
     args = ap.parse_args()
@@ -455,6 +460,15 @@ def main():
     mode = f"k={args.k}" + (", adaptive" if args.adaptive else "")
     print(f"[Select] 语义代表帧: {len(reps)} 张 ({mode}, interval={interval:.1f}s) "
           f"(压缩到 {len(reps)/info['count']*100:.1f}%)")
+
+    if args.llm_export:
+        from .llm_export import export_llm_pack
+        pack = export_llm_pack(reps, args.llm_export,
+                               max_width=args.llm_max_width)
+        print(f"[Select] LLM 导出: {pack['rep_count']} 张缩放图"
+              f"(token≈{pack['tokens_direct']}) + "
+              f"{len(pack['grids'])} 张联系表(token≈{pack['tokens_grid']}) "
+              f"-> {args.llm_export}")
 
     if args.out:
         write_json(os.path.dirname(args.out) or '.', os.path.basename(args.out),

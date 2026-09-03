@@ -92,15 +92,28 @@ class StreamingConsumer:
             }
 
 
-def _asr_job(video_path, wav_path, out_segments, sr=16000):
-    """后台声音链：流式ASR，阻塞直到完成，写入 out_segments。"""
+def _asr_job(video_path, wav_path, out_segments, sr=16000, mode="auto"):
+    """后台声音链：ASR 转写，阻塞直到完成，写入 out_segments。
+
+    mode: auto(默认)=文件转写走离线 SenseVoice（全上下文，专名/可读性更优），
+          离线不可用时回退流式；streaming=强制流式路径。
+    """
     samples, sr2 = load_wav(wav_path, sr)
     if len(samples) == 0:
         return
+    from .asr_clean import clean_asr_segments
+
+    if mode in ("auto", "offline"):
+        try:
+            from .asr_sherpa import load_offline_recognizer, transcribe_offline
+            recognizer = load_offline_recognizer()
+            out_segments.extend(
+                clean_asr_segments(transcribe_offline(recognizer, samples, sr2)))
+            return
+        except Exception as e:
+            print(f"[ASR] 离线转写不可用({e})，回退流式")
     recognizer = load_streaming_recognizer()
     segs = transcribe_streaming(recognizer, samples, sr2)
-    # 清洗层：连叠折叠 + 相邻去重 + 幻觉标记（纯后处理，不动解码引擎）
-    from .asr_clean import clean_asr_segments
     out_segments.extend(clean_asr_segments(segs))
 
 
@@ -185,9 +198,12 @@ def run_realtime_pipeline(video_path=None, output_dir=None, save_keyframes=True,
     wav_path = extract_audio(video_path, sr=16000) if video_path else None
     asr_segments = []
     asr_thread = None
+    # W8 借鉴 crv：文件转写默认走离线模型（全上下文）；VUS_ASR_MODE=streaming 可强制流式
+    asr_mode = os.environ.get("VUS_ASR_MODE", "auto")
     if wav_path and os.path.exists(wav_path):
         asr_thread = threading.Thread(target=_asr_job,
                                       args=(video_path, wav_path, asr_segments),
+                                      kwargs={"mode": asr_mode},
                                       daemon=True)
         asr_thread.start()
 

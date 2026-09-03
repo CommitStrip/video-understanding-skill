@@ -310,6 +310,78 @@ def _mock_transcribe(samples, sr=16000, chunk_sec=2.0):
 # 离线识别需求统一走 transcribe_streaming（W2 实时源波次再评估真离线模型）。
 
 
+def load_offline_recognizer(model_dir=None):
+    """加载 SenseVoice 离线识别器（非流式，全上下文解码）。
+
+    中文专名与可读性显著优于流式 zipformer（流式上下文窗口短），
+    用于文件转写默认路径；对 BGM 鲁棒。模型经 model_setup 自动下载。
+    返回识别器对象；模型缺失/加载失败时抛 RuntimeError（默认路径不静默降级）。
+    """
+    try:
+        import sherpa_onnx
+    except ImportError as e:
+        raise RuntimeError("sherpa-onnx 未安装，离线识别不可用") from e
+    from .model_setup import ensure_offline_asr_model, find_offline_asr_model
+
+    model_dir = model_dir or ensure_offline_asr_model() or find_offline_asr_model()
+    if not model_dir:
+        raise RuntimeError("离线模型未找到且自动下载被关闭（VUS_ASR_AUTO_DOWNLOAD=0）")
+    model_file = None
+    for cand in ("model.int8.onnx", "model.onnx"):
+        p = os.path.join(model_dir, cand)
+        if os.path.exists(p):
+            model_file = p
+            break
+    if not model_file:
+        for root, _dirs, files in os.walk(model_dir):
+            for f in files:
+                if f.startswith("model") and f.endswith(".onnx"):
+                    model_file = os.path.join(root, f)
+                    break
+            if model_file:
+                break
+    if not model_file:
+        raise RuntimeError(f"离线模型目录缺少 model onnx: {model_dir}")
+    tokens = None
+    for root, _dirs, files in os.walk(model_dir):
+        if "tokens.txt" in files:
+            tokens = os.path.join(root, "tokens.txt")
+            break
+    if not tokens:
+        raise RuntimeError(f"离线模型目录缺少 tokens.txt: {model_dir}")
+    recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+        model=model_file,
+        tokens=tokens,
+        num_threads=2,
+        use_itn=True,
+    )
+    print("[ASR] 离线识别器（SenseVoice int8）加载成功")
+    return recognizer
+
+
+def transcribe_offline(recognizer, samples, sr=16000, window_sec=15.0):
+    """离线全局转写：按 window_sec 切窗（离线有全窗上下文，无流式短窗问题）。
+
+    返回段格式与 transcribe_streaming 一致：[{"t": 窗起点, "text": ...}]。
+    """
+    segments = []
+    total = len(samples)
+    win = int(sr * window_sec)
+    if win <= 0:
+        win = int(sr)
+    for start in range(0, total, win):
+        block = samples[start:start + win]
+        if len(block) < sr * 0.2:
+            break
+        stream = recognizer.create_stream()
+        stream.accept_waveform(sr, block)
+        recognizer.decode_stream(stream)
+        text = recognizer.get_result(stream).strip()
+        if text:
+            segments.append({"t": round(start / sr, 3), "text": text})
+    return segments
+
+
 if __name__ == '__main__':
     # 快速自测
     print("=== ASR 模块自测 ===")

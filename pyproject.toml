@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vus"
-version = "0.3.0"
+version = "0.4.0"
 description = "vus - 可安装的实时视频理解核心库（快慢双路径画面链 + 流式 ASR + 语义代表帧）"
 readme = "README.md"
 requires-python = ">=3.9"

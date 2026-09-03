@@ -12,7 +12,7 @@
     python -m vus.integrated_pipeline --source rtsp --url rtsp://host/stream
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from .smart_pipeline import SmartPipeline
 from .integrated_pipeline import run_realtime_pipeline
