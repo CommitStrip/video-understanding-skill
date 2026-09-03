@@ -6,10 +6,12 @@
 用法:
     from vus import SmartPipeline, run_realtime_pipeline, select_representatives
     from vus import FileSource, CameraSource, RTSPSource  # W2 实时源
+    from vus.live import run_live  # W8 实时理解栈
 
     # 模块方式运行
     python -m vus.integrated_pipeline --video x.mp4 --output out/
     python -m vus.integrated_pipeline --source rtsp --url rtsp://host/stream
+    python -m vus.live --video x.mp4 --realtime --vlm mock --serve
 """
 
 __version__ = "0.4.0"
@@ -18,12 +20,14 @@ from .smart_pipeline import SmartPipeline
 from .integrated_pipeline import run_realtime_pipeline
 from .select_representatives import select_representatives
 from .source import FrameSource, FileSource, CameraSource, RTSPSource
+from .live import run_live
 
 __all__ = [
     "__version__",
     "SmartPipeline",
     "run_realtime_pipeline",
     "select_representatives",
+    "run_live",
     "FrameSource",
     "FileSource",
     "CameraSource",
