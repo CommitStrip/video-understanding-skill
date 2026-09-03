@@ -117,14 +117,25 @@ class UnderstandingWorker:
             t.join(timeout=timeout)
         self._threads = []
 
-    def wait_idle(self, timeout=10.0):
-        """等触发清零、队列清空且无在飞调用（测试/E2E 用）。"""
+    def wait_idle(self, timeout=10.0, quiet_s=0.05):
+        """等全部已发布事件被消费、无在飞调用、无待触发素材，并保持安静 quiet_s。
+
+        双检去抖：条件需连续保持 quiet_s 才算空闲——否则调用方在"事件已发布
+        但采集线程还没来得及消费"的窗口里会误判空闲（事件在订阅队列里时，
+        内部触发/在飞标志均尚未置位）。
+        """
         deadline = time.monotonic() + timeout
+        quiet_since = None
         while time.monotonic() < deadline:
-            if (not self._triggered and not self._in_flight.is_set()
-                    and self._win_q.empty()):
+            busy = (self._triggered or self._in_flight.is_set()
+                    or not self._win_q.empty() or len(self._sub) > 0)
+            if busy:
+                quiet_since = None
+            elif quiet_since is None:
+                quiet_since = time.monotonic()
+            elif time.monotonic() - quiet_since >= quiet_s:
                 return True
-            time.sleep(0.01)
+            time.sleep(0.005)
         return False
 
     def aligned_segments(self):

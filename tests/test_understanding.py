@@ -102,6 +102,19 @@ def test_single_flight_coalescing_no_call_explosion(tmp_path):
         w.stop()
 
 
+def _eventually(fn, want, timeout=5.0):
+    """轮询断言：状态由后台线程推进，给写入可见性一个截止窗口。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if fn() == want:
+                return True
+        except (IndexError, KeyError, TypeError):
+            pass
+        time.sleep(0.02)
+    return False
+
+
 def test_asr_trigger_prompt_material_and_aligned(tmp_path):
     bus, state = EventBus(), SessionState()
     vlm = MockVLM()
@@ -116,12 +129,13 @@ def test_asr_trigger_prompt_material_and_aligned(tmp_path):
         prompt = vlm.calls[0]["prompt"]
         assert "大家好" in prompt and "今天讲无人机" in prompt
         assert "运动事件" in prompt
-        aligned = w.aligned_segments()
-        assert len(aligned) == 2
-        assert aligned[0] == {"start": 2.0, "end": 4.0, "text": "大家好",
-                              "linked_motion_events": 0, "linked_keyframes": 0,
-                              "motion_types": []}
-        assert aligned[1]["end"] == 6.0  # flush 用 end_t 兜底
+        # 滚动对齐：段 2 无后续边界，保持 pending（与批式"最后一段 flush 闭窗"一致）
+        assert len(w.aligned_segments()) == 1
+        assert w.aligned_segments()[0] == {
+            "start": 2.0, "end": 4.0, "text": "大家好",
+            "linked_motion_events": 0, "linked_keyframes": 0, "motion_types": []}
+        # 流结束 flush：最后一段用 end_t 兜底闭窗
+        assert w.flush_aligner()[1]["end"] == 6.0
     finally:
         w.stop()
 
@@ -167,7 +181,9 @@ def test_understanding_lag_telemetry(tmp_path):
         bus.publish(_kf_event(5.0, _make_kf(tmp_path)))
         assert w.wait_idle(timeout=5.0)
         bus.publish({"type": "motion", "t": 9.0})  # 时钟推进到 9s
-        assert state.snapshot()["telemetry"]["lag"]["t2_s"] == 4.0  # 9 - 5
+        # 状态由采集线程异步写入，轮询等待可见
+        assert _eventually(
+            lambda: state.snapshot()["telemetry"]["lag"]["t2_s"], 4.0)  # 9 - 5
     finally:
         w.stop()
 
