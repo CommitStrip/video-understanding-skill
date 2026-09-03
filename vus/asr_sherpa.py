@@ -195,9 +195,135 @@ def _first_new_token_time(tokens, n_consumed, chunk_t, chunk_sec, sr):
     return chunk_t
 
 
+# mock 占位文本（_mock_transcribe 与 StreamingASR 的 mock 语义共用）
+_MOCK_TEXTS = [
+    "[音频段] 此段为模拟ASR输出",
+    "[音频段] sherpa-onnx模型未加载",
+    "[音频段] 框架验证模式",
+]
+
+
+class StreamingASR:
+    """增量流式 ASR 解码状态机（W8）：feed() 样本块 → 产出终稿段。
+
+    从 transcribe_streaming 的循环体抽出，使"文件整段切块喂入"与
+    "直播音频实时块喂入"共用同一解码状态机，两条路径段产出语义一致：
+      - feed() 内部缓冲，凑满一个 chunk 才解码（块边界与文件路径完全一致）；
+      - flush() 解码残余不足一块的样本并补发收尾兜底段；
+      - 端点检测触发 reset 后增量基线同步归零（与原实现一致）；
+      - recognizer=None 时按 mock 语义逐 chunk 产出占位段（契约同旧结构）。
+    线程模型：单线程喂入（decode 内部状态非线程安全），跨线程取结果由调用方自理。
+    """
+
+    def __init__(self, recognizer, sr=16000, chunk_sec=2.0):
+        self.recognizer = recognizer
+        self.sr = sr
+        self.chunk_sec = chunk_sec
+        self.chunk_samples = max(1, int(sr * chunk_sec))
+        self._stream = recognizer.create_stream() if recognizer is not None else None
+        self._buf = np.array([], dtype=np.float32)  # 不足一块的残余样本
+        self._prev = ""                              # 当前流内已发射文本前缀
+        self._n_consumed_tokens = 0                  # 当前流内已被旧文本归属的 token 数
+        self._next_start = 0                         # 下一 chunk 起始样本（绝对时间基）
+        self._mock_idx = 0
+        self._emitted = 0                            # 累计产出段数（收尾兜底判据）
+        self._finished = False
+
+    def feed(self, block):
+        """喂入任意长度样本块，返回本批新产出的终稿段列表（可能为空）。"""
+        if self._finished:
+            return []
+        block = np.asarray(block, dtype=np.float32)
+        if len(block) == 0:
+            return []
+        if len(self._buf):
+            block = np.concatenate([self._buf, block])
+        segments = []
+        n_full = (len(block) // self.chunk_samples) * self.chunk_samples
+        for s in range(0, n_full, self.chunk_samples):
+            segments.extend(self._feed_chunk(block[s:s + self.chunk_samples]))
+        self._buf = block[n_full:]
+        return segments
+
+    def flush(self):
+        """收尾：解码残余样本；仅当全程未产出任何段而确有文本时补发兜底段。"""
+        if self._finished:
+            return []
+        self._finished = True
+        segments = []
+        if len(self._buf) > 0:
+            segments.extend(self._feed_chunk(self._buf))
+            self._buf = np.array([], dtype=np.float32)
+        if (self.recognizer is not None and self._emitted == 0
+                and self._prev.strip()):
+            segments.append({
+                "t": round((self._next_start - self.chunk_samples) / self.sr, 3),
+                "text": self._prev.strip(),
+                "end_t": round(self._next_start / self.sr, 3),
+            })
+        return segments
+
+    def _feed_chunk(self, sub):
+        """解码一个 chunk（≤ chunk_samples）。
+
+        next_start 无条件按整 chunk 推进、end_t 用实际样本数——与文件路径
+        `start += chunk` / `end = min(start+chunk, n)` 的语义逐点一致。
+        """
+        if self.recognizer is None:
+            seg = {
+                "t": round(self._next_start / self.sr, 3),
+                "text": _MOCK_TEXTS[self._mock_idx % len(_MOCK_TEXTS)],
+            }
+            self._mock_idx += 1
+            self._emitted += 1
+            self._next_start += self.chunk_samples
+            return [seg]
+
+        rec = self.recognizer
+        stream = self._stream
+        stream.accept_waveform(self.sr, sub.astype(np.float32))
+        while rec.is_ready(stream):
+            rec.decode_stream(stream)
+
+        chunk_t = self._next_start / self.sr
+        end_t = (self._next_start + len(sub)) / self.sr
+        tokens = _token_timestamps(rec, stream)
+        cur = rec.get_result(stream)
+
+        segments = []
+        if cur and cur != self._prev:
+            if cur.startswith(self._prev):
+                inc = cur[len(self._prev):]
+            else:
+                inc = cur
+            inc = inc.strip()
+            if inc:
+                seg_t = _first_new_token_time(tokens, self._n_consumed_tokens,
+                                              chunk_t, self.chunk_sec, self.sr)
+                segments.append({
+                    "t": round(seg_t, 3),
+                    "text": inc,
+                    "end_t": round(end_t, 3)
+                })
+                self._emitted += 1
+            self._prev = cur
+
+        # 记录本 chunk 解码出的 token 总数，供下一 chunk 定位"新增 token"
+        self._n_consumed_tokens = len(tokens)
+
+        # 端点检测
+        if rec.is_endpoint(stream):
+            rec.reset(stream)
+            self._prev = ""
+            self._n_consumed_tokens = 0
+
+        self._next_start += self.chunk_samples
+        return segments
+
+
 def transcribe_streaming(recognizer, samples, sr=16000, chunk_sec=2.0):
     """
-    流式ASR词级落盘
+    流式ASR词级落盘（W8 起内部委托 StreamingASR，输入输出契约不变）
     输入: recognizer (sherpa_onnx.OnlineRecognizer 或 None), samples, sr
     输出: [{"t": float, "text": str, "end_t": float}, ...]
 
@@ -206,71 +332,11 @@ def transcribe_streaming(recognizer, samples, sr=16000, chunk_sec=2.0):
         （t = token.start / sample_rate），段的 "t" 为该 chunk 内首个新 token 的真实时间；
       - API 不可用 / 时间戳越界时回退到 2s chunk 起点粗粒度（旧行为）；
       - 每段附带 "end_t"（该 chunk 末尾时间），对齐层可选消费；
-      - recognizer 为 None 时走 _mock_transcribe（mock 段保持 {"t","text"} 旧结构）。
+      - recognizer 为 None 时走 mock 语义（mock 段保持 {"t","text"} 旧结构）。
     """
-    if recognizer is None:
-        return _mock_transcribe(samples, sr, chunk_sec)
-
-    segments = []
-    n = len(samples)
-    chunk = int(sr * chunk_sec)
-    if chunk == 0:
-        chunk = n
-
-    stream = recognizer.create_stream()
-    prev = ""
-    n_consumed_tokens = 0  # 当前流内已被旧文本归属的 token 数
-    start = 0
-
-    while start < n:
-        end = min(start + chunk, n)
-        block = samples[start:end].astype(np.float32)
-
-        stream.accept_waveform(sr, block)
-        while recognizer.is_ready(stream):
-            recognizer.decode_stream(stream)
-
-        chunk_t = start / sr
-        tokens = _token_timestamps(recognizer, stream)
-        cur = recognizer.get_result(stream)
-
-        if cur and cur != prev:
-            if cur.startswith(prev):
-                inc = cur[len(prev):]
-            else:
-                inc = cur
-            inc = inc.strip()
-            if inc:
-                seg_t = _first_new_token_time(tokens, n_consumed_tokens,
-                                              chunk_t, chunk_sec, sr)
-                segments.append({
-                    "t": round(seg_t, 3),
-                    "text": inc,
-                    "end_t": round(end / sr, 3)
-                })
-            prev = cur
-
-        # 记录本 chunk 解码出的 token 总数，供下一 chunk 定位"新增 token"
-        n_consumed_tokens = len(tokens)
-
-        # 端点检测
-        if recognizer.is_endpoint(stream):
-            recognizer.reset(stream)
-            prev = ""
-            n_consumed_tokens = 0
-
-        start += chunk
-
-    # 收尾兜底：正常增量路径已在循环内逐段产出（prev 已完整发射，不再重复落盘）；
-    # 仅当全程未能产出任何段但确有文本（如增量均被 strip 清空）时补一段，
-    # 时间戳无 chunk 上下文可用，回退最后一个 chunk 起点粗粒度。
-    if not segments and prev.strip():
-        segments.append({
-            "t": round((start - chunk) / sr, 3),
-            "text": prev.strip(),
-            "end_t": round(start / sr, 3)
-        })
-
+    asr = StreamingASR(recognizer, sr=sr, chunk_sec=chunk_sec)
+    segments = asr.feed(samples)
+    segments.extend(asr.flush())
     return segments
 
 
@@ -280,28 +346,9 @@ def _mock_transcribe(samples, sr=16000, chunk_sec=2.0):
     按固定间隔产出空文本段，保持时间轴结构完整
     （保持旧结构 {"t","text"}，不带 end_t，作为契约兜底）
     """
-    segments = []
-    n = len(samples)
-    duration = n / sr if sr > 0 else 0
-    chunk = int(sr * chunk_sec)
-
-    mock_texts = [
-        "[音频段] 此段为模拟ASR输出",
-        "[音频段] sherpa-onnx模型未加载",
-        "[音频段] 框架验证模式",
-    ]
-
-    start = 0
-    idx = 0
-    while start < n:
-        t = start / sr
-        segments.append({
-            "t": round(t, 3),
-            "text": mock_texts[idx % len(mock_texts)]
-        })
-        start += chunk
-        idx += 1
-
+    asr = StreamingASR(None, sr=sr, chunk_sec=chunk_sec)
+    segments = asr.feed(samples)
+    segments.extend(asr.flush())
     return segments
 
 
@@ -376,7 +423,7 @@ def transcribe_offline(recognizer, samples, sr=16000, window_sec=15.0):
         stream = recognizer.create_stream()
         stream.accept_waveform(sr, block)
         recognizer.decode_stream(stream)
-        text = recognizer.get_result(stream).strip()
+        text = stream.result.text.strip()
         if text:
             segments.append({"t": round(start / sr, 3), "text": text})
     return segments

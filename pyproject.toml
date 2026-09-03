@@ -25,4 +25,4 @@ ocr = ["rapidocr-onnxruntime>=1.3"]
 
 [tool.setuptools]
 # 显式列出包，避免自动发现把 scripts/、bench/ 等应用层脚本打进 wheel
-packages = ["vus"]
+packages = ["vus", "vus.live"]
