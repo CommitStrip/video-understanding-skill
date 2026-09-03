@@ -10,12 +10,16 @@ description: "把视频（尤其直播课程、讲座、长视频）变成结构
 ## 前置条件
 
 1. 依赖：`pip install -e .`（或直接跑——`scripts/` 下的旧命令入口内置了路径兜底，无需安装）。必需 `opencv-python`、`numpy`；ffmpeg 用于抽音频。
-2. **真字幕**（强烈建议）：`pip install sherpa-onnx`，模型下载到 `models/sherpa/`：
+2. **真字幕**（默认开箱即用）：`pip install sherpa-onnx` 后，首次运行缺模型会
+   自动从官方源下载（约 490MB，一次性；`VUS_ASR_AUTO_DOWNLOAD=0` 关闭）。
+   也可手动下载到 `models/sherpa/`：
    ```bash
    curl -L -o - https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2 | tar -xj -C models/sherpa --strip-components=1
    ```
    模型目录可用环境变量 `VUS_SHERPA_MODELS` 指定。
-   🔴 **警告：未装 sherpa-onnx 时字幕是"mock 占位假文本"（固定提示语，非真实内容）——禁止把 mock 字幕当作真实转写交付给用户**，必须在报告里注明字幕缺失。
+   🔴 **警告：sherpa-onnx 未安装或自动下载被关闭且模型缺失时，字幕是
+   "mock 占位假文本"（固定提示语，非真实内容）——禁止把 mock 字幕当作
+   真实转写交付给用户**，必须在报告里注明字幕缺失。
 3. 可选增强：`pip install -e ".[clip]"` + `bash scripts/download_clip_onnx.sh`（CLIP 语义选帧，权重目录 `VUS_CLIP_MODELS`）；`pip install -e ".[ocr]"` + 管线 `--ocr`（幻灯片文字提取）。
 
 ## 工作流

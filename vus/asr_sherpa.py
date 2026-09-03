@@ -84,21 +84,33 @@ def load_streaming_recognizer(model_dir=None):
         print("[ASR] sherpa-onnx 未安装，使用 fallback 模式")
         return None
 
-    # 查找模型目录：环境变量优先，其次用户目录 / 当前目录
+    # 查找模型目录（共享 model_setup 逻辑：目录必须含完整模型文件）
     if model_dir is None:
-        candidates = [
-            os.environ.get("VUS_SHERPA_MODELS") or "",
-            os.path.expanduser("~/sherpa-onnx-models"),
-            "./models",
-        ]
-        for c in candidates:
-            if c and os.path.exists(c):
-                model_dir = c
-                break
+        try:
+            from .model_setup import find_asr_model
+            model_dir = find_asr_model()
+        except ImportError:
+            candidates = [
+                os.environ.get("VUS_SHERPA_MODELS") or "",
+                os.path.expanduser("~/sherpa-onnx-models"),
+                "./models/sherpa",
+                "./models",
+            ]
+            for c in candidates:
+                if c and os.path.exists(c):
+                    model_dir = c
+                    break
 
     if model_dir is None or not os.path.exists(model_dir):
-        print("[ASR] 模型目录未找到，使用 fallback 模式")
-        return None
+        # 默认开箱即用：缺模型时自动从官方源下载（VUS_ASR_AUTO_DOWNLOAD=0 关闭）
+        try:
+            from .model_setup import ensure_asr_model
+            model_dir = ensure_asr_model(model_dir)
+        except ImportError:
+            model_dir = None
+        if model_dir is None:
+            print("[ASR] 模型目录未找到，使用 fallback 模式")
+            return None
 
     # 查找流式模型
     encoder = None

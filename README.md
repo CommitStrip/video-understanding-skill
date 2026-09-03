@@ -45,15 +45,17 @@ pip install -e ".[clip]"         # CLIP semantic frame selection (ONNX)
 pip install -e ".[ocr]"          # OCR channel
 ```
 
-Models are not bundled:
+Models are not bundled. **Real ASR is the default**: on first run the missing
+model is downloaded automatically from the official sherpa-onnx release
+(~490 MB, once). To opt out set `VUS_ASR_AUTO_DOWNLOAD=0`, or fetch manually:
 
 ```bash
-# ASR model (Xiaomi sherpa-onnx streaming zipformer, zh+en, ~490 MB)
+# ASR model (Xiaomi sherpa-onnx streaming zipformer, zh+en, ~490 MB) — auto by default
 mkdir -p models/sherpa
 curl -L -o - https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2 \
   | tar -xj -C models/sherpa --strip-components=1
 
-# CLIP visual encoder (ONNX, ~600 MB)
+# CLIP visual encoder (ONNX, ~600 MB) — optional, via download script
 bash scripts/download_clip_onnx.sh
 ```
 

@@ -29,15 +29,17 @@ pip install -e ".[clip]"         # CLIP 语义选帧（ONNX）
 pip install -e ".[ocr]"          # OCR 通道
 ```
 
-模型权重不入库，需单独获取：
+模型权重不入库。**真 ASR 默认开箱即用**：首次运行时若缺模型会自动从官方
+sherpa-onnx release 下载（约 490MB，一次性）。设 `VUS_ASR_AUTO_DOWNLOAD=0`
+可关闭自动下载，或手动获取：
 
 ```bash
-# ASR 模型（小米 sherpa-onnx 流式 zipformer，中英双语，约 490MB）
+# ASR 模型（小米 sherpa-onnx 流式 zipformer，中英双语，约 490MB）——默认自动下载
 mkdir -p models/sherpa
 curl -L -o - https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2 \
   | tar -xj -C models/sherpa --strip-components=1
 
-# CLIP 视觉编码器（ONNX，约 600MB）
+# CLIP 视觉编码器（ONNX，约 600MB）——可选项，经下载脚本获取
 bash scripts/download_clip_onnx.sh
 ```
 
