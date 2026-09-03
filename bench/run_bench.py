@@ -11,6 +11,39 @@ from vus.io_utils import write_json
 BENCH = os.path.dirname(os.path.abspath(__file__))
 TESTS = ['aba', 'slow', 'hue', 'static']
 
+def _find_frames_json(outdir, result=None):
+    """crv 产物 frames.json 的可能位置：结果对象属性优先，其次 outdir 递归搜索。"""
+    fj = getattr(result, "frames_json_path", None) if result is not None else None
+    if fj and os.path.exists(fj):
+        yield fj
+    if outdir and os.path.isdir(outdir):
+        for root, _dirs, files in os.walk(outdir):
+            if "frames.json" in files:
+                yield os.path.join(root, "frames.json")
+
+
+def _parse_frames_json(data):
+    """解析 crv frames.json，兼容两种格式：
+
+    - 旧假设：裸列表 [{"t": ...}, ...] 或 [秒数, ...]
+    - crv 0.10+ 实际：{"frames": [{"timestamp_sec": ...}, ...]}
+    返回时间戳列表。
+    """
+    frames = data
+    if isinstance(data, dict):
+        frames = data.get("frames", [])
+    tts = []
+    if not isinstance(frames, list):
+        return tts
+    for d in frames:
+        if isinstance(d, dict):
+            v = d.get("timestamp_sec", d.get("t", d.get("timestamp", d.get("time", 0))))
+            tts.append(v)
+        elif isinstance(d, (int, float)):
+            tts.append(d)
+    return [t for t in tts if isinstance(t, (int, float))]
+
+
 def run_crv(video):
     """用 claude-real-video 处理，返回 (elapsed, n_frames, timestamps)"""
     from claude_real_video import process
@@ -18,18 +51,17 @@ def run_crv(video):
     t0 = time.time()
     r = process(video, outdir, do_transcribe=False)
     elapsed = time.time() - t0
-    # 统计帧
+    # 统计帧：兼容 crv 0.10+ 的 {"frames":[...]}+timestamp_sec 格式
     tts = []
-    fj = r.frames_json_path if hasattr(r, 'frames_json_path') else None
-    if fj and os.path.exists(fj):
-        with open(fj) as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            for d in data:
-                if isinstance(d, dict):
-                    tts.append(d.get('t', d.get('timestamp', d.get('time', 0))))
-                elif isinstance(d, (int, float)):
-                    tts.append(d)
+    for fj in _find_frames_json(outdir, r):
+        try:
+            with open(fj) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        tts = _parse_frames_json(data)
+        if tts:
+            break
     n = len(tts)
     return elapsed, n, tts
 
