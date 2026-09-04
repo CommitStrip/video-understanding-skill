@@ -165,7 +165,9 @@ flowchart LR
 
 ## 📊 性能基准
 
-以下均为实测数值，单机纯 CPU，复现脚本在 `bench/`。
+以下均为实测数值，单机纯 CPU，复现脚本在 `bench/`。压力测试的执行环境为
+Trae 云端容器（多核虚拟核、纯 CPU、无 GPU），完整报告见
+[`bench/real/BENCHMARK_REPORT.md`](bench/real/BENCHMARK_REPORT.md)。
 
 ### 压力测试——45.5 分钟 1080p30 演唱会录像（81,878 帧，1.15GB）
 
