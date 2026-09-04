@@ -1,28 +1,40 @@
-# vus — Video Understanding Skill（视频理解技能）
+<div align="center">
+
+<img src="docs/logo.svg" width="640" alt="vus — Video Understanding Skill"/>
+
+[**English**](README.md) · 简体中文 · [SKILL.md](SKILL.md) · [性能基准报告](bench/performance-test-results.md)
 
 [![CI](https://github.com/CommitStrip/video-understanding-skill/actions/workflows/ci.yml/badge.svg)](https://github.com/CommitStrip/video-understanding-skill/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![GitHub tag](https://img.shields.io/github/v/tag/CommitStrip/video-understanding-skill)](https://github.com/CommitStrip/video-understanding-skill/tags)
+[![Tests](https://img.shields.io/badge/tests-203%20passed-brightgreen)](https://github.com/CommitStrip/video-understanding-skill/actions)
 
-[English](README.md) | **简体中文**
+**把视频压缩成 LLM 读得懂的样子 · Compress video into what an LLM can actually read**
 
-把一段视频变成**结构化、可被大模型直接消费的理解产物**：语义代表帧 + 时间轴对齐的 ASR 字幕 + 运动段。把 30fps 的十几万帧原始视频压缩成几十张多模态模型真正读得过来的代表帧——且不漏关键内容。同一套架构也支持**直播**：对接 RTSP 流或摄像头，大模型边看边懂，延迟有界不增长。
+</div>
 
-**压力实测**：45.5 分钟 1080p30 演唱会录像（1.15GB、81,878 帧）——**端到端 4.7× 实时**、峰值内存 736MB、59,556 个事件**零丢弃**、简体中文字幕可达 A 级可读、41 帧的 LLM 导出仅约 **13k tokens**。完整数据见[性能基准](#性能基准)。
+---
 
-## 核心特性
+vus 把 30fps 的原始视频（十几万帧）压缩成**语义代表帧 + 时间轴对齐字幕 + 运动段**，让多模态大模型不漏关键地读懂一段视频。同一套架构既支持**文件离线转写**（默认离线 SenseVoice 全上下文识别，A 级中文可读性），也支持 **RTSP/摄像头直播**（流式识别 + 触发式 VLM 滚动理解，延迟有界）。
+
+<div align="center">
+<img src="docs/images/demo.jpg" width="860" alt="vus 管线真实输出：30 张语义代表帧联系表"/>
+<br/><sub>▲ vus 管线真实输出——11 分钟抖音解说视频的 30 张语义代表帧（Tier3，--max-reps 30）</sub>
+</div>
+
+## ✨ 核心特性
 
 - **实时预算分配**——快系统（逐帧运动门控，约占 3% 预算）触发慢系统（低频关键帧 + 触发式重活）。能直接跑在机器人/边缘设备上，不只是文件回放。
 - **直播理解**——`vus.live`：四层栈，毫秒级本地打标 + 触发式 VLM 滚动理解（成本可控旋钮）+ SSE 状态服务，为机器人实时视觉而生。
 - **实时源**——视频文件 / 摄像头 / RTSP 流统一 `FrameSource` 接口；RTSP 带最新帧背压、断流自动重连、单调时钟时间戳。
 - **三层压缩**——原始帧 → 镜头级关键帧 → 语义代表帧，解决"镜头切换 ≠ 内容变化"的冗余问题。
-- **渐变演化不丢帧**——课件批注推进、镜头缓摇这类缓慢内容演化，由漂移确认机制捕获，不再只认硬切换。
+- **渐变演化不丢帧**——课件批注推进、镜头缓摇这类缓慢内容演化，由漂移确认机制（硬窗口 + 持续软车道）捕获，不再只认硬切换。
 - **双语 ASR 双通道**——文件转写默认走 SenseVoice int8 离线模型（全上下文解码，A 级可读性，对 BGM 鲁棒）；直播音频走流式 zipformer 通道（词级时间戳）。模型缺失时显式降级、绝不静默造假。
 - **LLM 友好导出**——代表帧自动缩放到 640px + 3×3 联系表拼图 + token 预算估算，跑之前就知道上下文成本。
 - **可选语义增强**——CLIP（ONNX，不依赖 PyTorch）语义选帧；OCR 通道提取内嵌文字。
 - **可安装、有测试**——`pip install -e .`，200+ pytest 用例，GitHub Actions CI。
 
-## 安装
+## 📦 安装
 
 ```bash
 pip install -e .                 # 核心（opencv-python + numpy）
@@ -41,23 +53,30 @@ pip install -e ".[ocr]"          # OCR 通道
 | 直播音频（RTSP/摄像头） | 流式 zipformer（中英） | ~490MB | 首次直播运行 |
 | CLIP 语义选帧（可选） | ViT-B/32 ONNX | ~600MB | `--clip` / 下载脚本 |
 
+<details>
+<summary>⏬ 手动下载 / 关闭自动下载 / 自定义模型目录</summary>
+
 设 `VUS_ASR_AUTO_DOWNLOAD=0` 可关闭自动下载；模型目录可用 `VUS_SHERPA_MODELS` /
-`VUS_OFFLINE_ASR_MODELS` / `VUS_CLIP_MODELS` 覆盖。
+`VUS_OFFLINE_ASR_MODELS` / `VUS_CLIP_MODELS` 覆盖；手动下载示例：
+
+```bash
+mkdir -p models/sherpa
+curl -L -o - https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2 \
+  | tar -xj -C models/sherpa --strip-components=1
+bash scripts/download_clip_onnx.sh   # CLIP ONNX
+```
+</details>
 
 > ⚠️ 未下载模型时字幕通道退化为 **mock 占位输出——是假文本，不是真实转写**。严禁把 mock 字幕当作真实内容交付。
 
-## 快速开始
+## 🚀 快速开始
 
 ```bash
 # 1. 提取结构化产物（关键帧 + 运动段 + 字幕）
 #    文件转写默认走离线 SenseVoice 通道
 python -m vus.integrated_pipeline --video lecture.mp4 --output out/ --kf-hz 1.5
 
-# 直播 / RTSP 实时流变体
-python -m vus.integrated_pipeline --source rtsp --url rtsp://host/stream --output out/
-
-# 带 OCR（只对 Tier3 代表帧执行——不进逐帧路径；ASR 输出自动清洗：
-# 循环折叠 + 相邻去重 + 幻觉标记）
+# 带 OCR（只对 Tier3 代表帧执行——不进逐帧路径）
 python -m vus.integrated_pipeline --video lecture.mp4 --output out/ --ocr
 
 # 2. 压缩为语义代表帧（Tier 3）并导出 LLM 包：
@@ -73,7 +92,7 @@ python -m vus.select_representatives --keyframes out/keyframes \
 #    生成课程讲义 / 剧情摘要 / 场景分析报告
 ```
 
-## 直播理解：边看边懂（v0.4）
+## 📡 直播理解：边看边懂（v0.4）
 
 离线管线解决"把一段视频压缩给 LLM 读"；`vus.live` 解决"直播流进来，LLM 边看边懂"。
 四层理解栈，每层按自己的物理极限跑满：
@@ -98,6 +117,9 @@ python -m vus.live --source rtsp --url rtsp://host/stream --vlm openai --serve
 python -m vus.live --video x.mp4 --realtime --vlm off --serve
 ```
 
+<details>
+<summary>💰 成本旋钮与结果消费方式</summary>
+
 成本旋钮：
 
 - **触发式调用**——场景切换 / 长运动段闭合 / 新语音段才发起，安静场景零调用；
@@ -107,16 +129,32 @@ python -m vus.live --video x.mp4 --realtime --vlm off --serve
 
 理解结果三路消费（可同时）：
 
-- **滚动文件**——`live_state.json`（机器可读）+ `live_context.md`（人/agent 可读），
-  原子落盘，任何 agent 任何时刻读文件即得当前理解（与离线 SKILL 工作流衔接）；
-- **SSE 服务**——`--serve` 后 `GET /state` 快照、`GET /events` 增量事件流、
-  `GET /healthz` 探活，是机器人与监控面板的订阅入口；
+- **滚动文件**——`live_state.json`（机器可读）+ `live_context.md`（人/agent 可读），原子落盘，任何 agent 任何时刻读文件即得当前理解（与离线 SKILL 工作流衔接）；
+- **SSE 服务**——`--serve` 后 `GET /state` 快照、`GET /events` 增量事件流、`GET /healthz` 探活；
 - **控制台**——周期打印当前摘要、分层滞后与调用遥测。
 
-长直播防膨胀：理解时间线超限自动把最旧条目合并成"前情章节"（纯文本，零 VLM 成本）；
-语音段与标签环均有界，内存不随时长增长。
+长直播防膨胀：理解时间线超限自动把最旧条目合并成"前情章节"（纯文本，零 VLM 成本）；语音段与标签环均有界，内存不随时长增长。
+</details>
 
-## 工作原理
+## 🏗️ 工作原理
+
+```mermaid
+flowchart LR
+    SRC["视频 / RTSP / 摄像头"] --> FS["FrameSource<br/>统一帧源"]
+    FS --> FAST["⚡ 快系统<br/>帧差门控 · 每帧 · ~3% 预算"]
+    FAST -->|有内容| SLOW["🐢 慢系统<br/>关键帧打分<br/>像素差分+pHash+直方图"]
+    FAST -->|运动| SEG["运动段"]
+    SLOW --> KF["Tier2 关键帧<br/>1-2s/张"]
+    KF --> T3["Tier3 语义选帧<br/>--max-reps / --k / --clip"]
+    T3 --> LLM["📦 LLM 导出包<br/>640px + 联系表 + token 估算"]
+    FS --> AUD["🎙 声音链<br/>ffmpeg → SenseVoice 离线<br/>（直播走流式）"]
+    AUD --> SUB["对齐字幕"]
+    KF --> OCR["🔍 OCR 花字<br/>（可选）"]
+    LLM --> MLLM["🧠 多模态大模型"]
+    SUB --> MLLM
+    OCR --> MLLM
+    SEG --> MLLM
+```
 
 | 层级 | 内容 | 数量级 | 用途 |
 |------|------|--------|------|
@@ -125,9 +163,9 @@ python -m vus.live --video x.mp4 --realtime --vlm off --serve
 | 2 | 镜头级关键帧 | 1-2s 一张 | 时间轴锚定 |
 | 3 | **语义代表帧** | 30-60s 一张 | **大模型理解** |
 
-快系统在降采样灰度小图上逐帧运行（帧差 + 语义门控，约占 3% 预算）；慢系统低频采样、仅在快系统报有内容时触发，用像素差分、pHash、直方图给候选打分——并配**渐变漂移确认**（硬窗口 + 持续软车道），覆盖感知哈希看不见的缓慢内容演化。
+渐变漂移确认分**两条车道**：硬车道（超硬阈在滑窗内累计达 N 次）捕获单帧突变式推进；软车道（软阈均分持续占满 30s 时间窗）覆盖"采纳即重置基准"后单帧增量低于硬阈的缓慢演化——感知哈希对这两类都失明。
 
-## 性能基准
+## 📊 性能基准
 
 以下均为实测数值，单机纯 CPU，复现脚本在 `bench/`。
 
@@ -150,7 +188,7 @@ vus 在**54 倍逐帧分析负载**下，端到端耗时仍只有基线的约一
 
 | 指标 | 结果 |
 |------|------|
-| 处理速率 | 147.7fps（**5.9× 实时**，流式 ASR 时期数据） |
+| 处理速率 | 147.7fps（**5.9× 实时**） |
 | 关键帧 | 41 个（35 渐变漂移 + 5 场景切换），覆盖 0→7150s 全片 |
 | ASR | 3505 段、约 3.3 万字，RTF 0.08（与画面链并行） |
 | 内存 | 稳定，ASR 模型释放后约 225MB |
@@ -162,13 +200,20 @@ vus 在**54 倍逐帧分析负载**下，端到端耗时仍只有基线的约一
 | 720p50 | 247fps | 4.9× |
 | 1080p30 | 78fps | 2.6× |
 
-### 与 claude-real-video（crv）合成片段对比
+### 与 claude-real-video（crv）对比
 
-4 组 12 秒可控合成片段上的受控对比（细节与复现见 `bench/`）：`static` 片段 crv 完全漏掉片尾突变（覆盖率 0%），本技能 2 帧完整捕获；slow/hue 渐变下同覆盖率帧数减半；`bench/semantic_eval/` 语义协议下冗余度 **1.0（4 帧/4 场景）** vs crv 12.0——同等覆盖率下 LLM 上下文成本省 12 倍。
+4 组 12 秒合成片段 + 真实视频双层对比（复现见 `bench/`）：`static` 片段 crv 完全漏掉片尾突变（覆盖率 0%），本技能 2 帧完整捕获；`bench/semantic_eval/` 语义协议下冗余度 **1.0（4 帧/4 场景）** vs crv 12.0——同等覆盖率下 LLM 上下文成本省 12 倍。
 
-> 诚实说明：像素覆盖率指标与选帧信号同源（`static` 的结论独立成立）；压力测试覆盖单一内容域（演唱会）、单机环境。复现脚本与语义评估协议在 `bench/`。
+<details>
+<summary>📖 诚实说明与对比口径</summary>
 
-## 仓库结构
+- 像素覆盖率指标与选帧信号同源（`static` 的结论独立成立）；
+- 压力测试覆盖单一内容域（演唱会）、单机环境（纯 CPU），结论外推到其他内容域需更多样本；
+- crv 官方依赖在线拉取 faster-whisper 模型，本测试首跑遇 TLS 中断后回退本地缓存 whisper base——对等条件；
+- 复现脚本与语义评估协议（标注指南 + 覆盖率/冗余度指标）在 `bench/`。
+</details>
+
+## 📁 仓库结构
 
 ```
 vus/                       可安装核心（pip install -e .）
@@ -197,23 +242,24 @@ vus/                       可安装核心（pip install -e .）
     rolling_align.py       流式对齐器（批式对齐的增量孪生）
 scripts/                   旧命令入口（薄壳，继续可用）
 bench/                     crv 对比、真实视频证据报告、语义评估协议
+docs/                      README 视觉素材（logo / 演示图）
 tests/                     pytest 用例 + 端到端冒烟（含 file-as-live）
 ```
 
-## 作为 AI 技能使用
+## 🤖 作为 AI 技能使用
 
 本仓库就是一个开箱即用的 agent 技能：把整个目录拷进你的 agent 技能目录
 （如 `~/.agents/skills/video-understanding-skill/`），内置的 `SKILL.md`
 会教会 agent 何时、如何运行管线——包括模型准备与 mock 字幕陷阱。无需安装：
 `scripts/` 旧入口自带路径兜底。
 
-## 硬件资源（实测）
+## 💻 硬件资源（实测）
 
 2 核 / 4GB 环境：实时画面链约占 1.2 核 + 166MB 内存；Tier3 离线选帧约
 317MB（内存有界）；ASR 解码期间额外 300-500MB。只跑画面链 512MB 内存即可；
 配 ASR 建议 2GB。45.5 分钟压力测试（含模型）峰值 736MB。
 
-## 致谢与版权
+## 🙏 致谢与版权
 
 - [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)——ASR 引擎，由小米
   （k2-fsa）开源维护。本仓库仅在 `vus/asr_sherpa.py` / `vus/model_setup.py`

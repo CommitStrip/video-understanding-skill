@@ -1,0 +1,22 @@
+<svg width="640" height="180" viewBox="0 0 640 180" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="vus — Video Understanding Skill">
+  <defs>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#35e0a1"/>
+      <stop offset="100%" stop-color="#4fd2ff"/>
+    </linearGradient>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0d1420"/>
+      <stop offset="100%" stop-color="#070b12"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="632" height="172" rx="16" fill="url(#bg)" stroke="#1e2b3f" stroke-width="2"/>
+  <!-- play-button motif -->
+  <g transform="translate(56, 62)">
+    <rect x="0" y="0" width="56" height="56" rx="12" fill="none" stroke="url(#accent)" stroke-width="3"/>
+    <path d="M 20 14 L 20 42 L 44 28 Z" fill="url(#accent)"/>
+  </g>
+  <text x="140" y="92" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="64" font-weight="700" fill="#d7e3f4">vus</text>
+  <text x="282" y="92" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="26" font-weight="600" fill="url(#accent)">Video Understanding Skill</text>
+  <text x="142" y="132" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="17" fill="#7e8ea6">视频 → 语义代表帧 + 对齐字幕 + 运动段 → 喂给 LLM</text>
+  <rect x="56" y="148" width="528" height="3" rx="1.5" fill="url(#accent)" opacity="0.55"/>
+</svg>
