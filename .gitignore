@@ -38,3 +38,7 @@ bench/semantic_eval/annotations/
 
 # 本地模型权重（下载脚本获取，不入库）
 models/
+
+# bench/real: crv 提帧产物（可由 crv 复现脚本再生，不入库）
+bench/real/**/frames/
+bench/real/**/frames.json

@@ -1,5 +1,12 @@
+# 核心依赖与 pyproject.toml 一致；本文件仅为 pip requirements 兼容入口
+# 完整依赖与可选 extras 见 pyproject.toml（pip install -e ".[asr,clip,ocr]"）
 opencv-python>=4.5
 numpy>=1.20
-# 可选：流式 ASR（缺省走 mock fallback，不影响管线核心功能）
-# sherpa-onnx>=1.10
-# 系统依赖：ffmpeg（用于抽音频）
+
+# 可选 extras：
+#   pip install -e ".[asr]"   # sherpa-onnx 流式/离线 ASR（文件转写默认走离线 SenseVoice，
+#                             # 模型首次运行自动下载；也可设 VUS_ASR_AUTO_DOWNLOAD=0 关闭）
+#   pip install -e ".[clip]"  # CLIP 语义选帧（onnxruntime）
+#   pip install -e ".[ocr]"   # OCR 花字通道（rapidocr-onnxruntime）
+#
+# 系统依赖：ffmpeg（声音链抽音频）
