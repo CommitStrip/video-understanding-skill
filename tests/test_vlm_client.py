@@ -146,3 +146,74 @@ def test_parse_understanding_json_variants():
     assert parse_understanding_json("没有 json") is None
     assert parse_understanding_json("{broken") is None
     assert parse_understanding_json('["数组不算"]') is None
+
+
+# ==================== W9 运动框裁剪编码 ====================
+
+import base64  # noqa: E402
+
+import cv2  # noqa: E402
+import numpy as np  # noqa: E402
+
+from vus.live.vlm_client import encode_frame_b64, encode_frame_crop_b64  # noqa: E402
+
+
+def _write_img(tmp_path, w=320, h=240, name="f.jpg"):
+    p = tmp_path / name
+    cv2.imwrite(str(p), np.full((h, w, 3), 40, dtype=np.uint8))
+    return str(p)
+
+
+def _decode_size(b64):
+    buf = base64.b64decode(b64)
+    img = cv2.imdecode(np.frombuffer(buf, np.uint8), cv2.IMREAD_COLOR)
+    return img.shape[:2]  # (h, w)
+
+
+def test_encode_frame_b64_regression(tmp_path):
+    path = _write_img(tmp_path)
+    b64 = encode_frame_b64(path, max_side=100)
+    assert b64
+    h, w = _decode_size(b64)
+    assert max(h, w) == 100
+
+
+def test_crop_maps_small_box_and_pads(tmp_path):
+    # 小图 box (2,2,8,6) @scale 0.25 → 原图 (8,8,32,24)；外扩 25%(8,6)
+    # → (0,2,48,36)，clamp 后 48x36，小于 max_side 不再缩放
+    path = _write_img(tmp_path)
+    b64 = encode_frame_crop_b64(path, [2, 2, 8, 6], scale=0.25,
+                                padding=0.25, max_side=448)
+    assert b64
+    h, w = _decode_size(b64)
+    assert (w, h) == (48, 36)
+
+
+def test_crop_clamps_at_image_border(tmp_path):
+    # box 贴右下角 (312,232,32,24)，padding=1.0 外扩全部被图边界 clamp
+    # → x:[280,320) y:[208,240) = 40x32
+    path = _write_img(tmp_path)
+    b64 = encode_frame_crop_b64(path, [78, 58, 8, 6], scale=0.25,
+                                padding=1.0, max_side=448)
+    assert b64
+    h, w = _decode_size(b64)
+    assert (w, h) == (40, 32)
+
+
+def test_crop_resizes_region_over_max_side(tmp_path):
+    path = _write_img(tmp_path, w=1000, h=800, name="big.jpg")
+    b64 = encode_frame_crop_b64(path, [0, 0, 500, 400], scale=1.0,
+                                padding=0.0, max_side=448)
+    assert b64
+    h, w = _decode_size(b64)
+    # 等比：500x400 区域 → 448x358
+    assert (w, h) == (448, 358)
+
+
+def test_crop_invalid_inputs_return_none(tmp_path):
+    path = _write_img(tmp_path)
+    assert encode_frame_crop_b64(tmp_path / "无.jpg", [0, 0, 10, 10]) is None
+    assert encode_frame_crop_b64(path, [0, 0, 0, 0]) is None
+    assert encode_frame_crop_b64(path, "bad") is None
+    # scale<=0 按 1.0 处理（box 视为原图坐标）
+    assert encode_frame_crop_b64(path, [0, 0, 10, 10], scale=0) is not None

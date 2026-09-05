@@ -203,7 +203,8 @@ class SmartPipeline:
                     "type": "motion_start",
                     "t": round(timestamp, 3),
                     "boxes": boxes,
-                    "motion_ratio": round(motion_ratio, 4)
+                    "motion_ratio": round(motion_ratio, 4),
+                    "scale": self.fast_scale
                 })
             elif self.motion_active:
                 # 运动持续
@@ -215,7 +216,8 @@ class SmartPipeline:
                     "type": "motion",
                     "t": round(timestamp, 3),
                     "boxes": boxes,
-                    "motion_ratio": round(motion_ratio, 4)
+                    "motion_ratio": round(motion_ratio, 4),
+                    "scale": self.fast_scale
                 })
         else:
             # 无有效运动

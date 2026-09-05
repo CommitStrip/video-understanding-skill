@@ -209,3 +209,80 @@ def test_stop_is_idempotent(tmp_path):
     w = _start(bus, state, MockVLM())
     w.stop()
     w.stop()  # 二次 stop 不抛错
+
+
+# ---------- W9 运动框裁剪喂 VLM（motion_crop） ----------
+
+import base64  # noqa: E402
+
+import cv2  # noqa: E402
+
+from vus.live.understanding import _Window  # noqa: E402
+
+
+def _decode_size(b64):
+    buf = base64.b64decode(b64)
+    img = cv2.imdecode(np.frombuffer(buf, np.uint8), cv2.IMREAD_COLOR)
+    return img.shape[:2]
+
+
+def _motion_event(t, bbox=(2, 2, 8, 6), scale=0.25, area=48):
+    return {"type": "motion", "t": t, "boxes": [
+        {"bbox": list(bbox), "centroid": [2, 2], "area": area}],
+        "motion_ratio": 0.01, "scale": scale}
+
+
+def _worker_with_material(tmp_path, cfg=None, with_motion=True, n_kf=2):
+    """同步喂数（不经线程），直接对 _win 断言 _build_prompt 结果。"""
+    bus, state = EventBus(), SessionState()
+    vlm = MockVLM()
+    w = UnderstandingWorker(bus, state, vlm, config=cfg, clock_fn=time.monotonic)
+    if with_motion:
+        w._on_event(_motion_event(0.5))
+    for i in range(n_kf):
+        w._on_event(_kf_event(1.0 + i, _make_kf(tmp_path, f"kf{i}.jpg")))
+    return w, vlm
+
+
+def test_motion_crop_replaces_last_frame_with_region(tmp_path):
+    # _make_kf 图为 64x48（h=48）：整帧编码 (48,64)；裁剪图 (2,2,8,6)@0.25
+    # → (8,8,32,24) 外扩 25% → (0,2,48,36) → (36,48)——尺寸可区分末张来源
+    w, _vlm = _worker_with_material(tmp_path, n_kf=2)
+    prompt, frames = w._build_prompt(w._win)
+    assert len(frames) == 2
+    assert "运动区域放大图" in prompt
+    assert _decode_size(frames[-1]) == (36, 48)   # 末张=裁剪图
+    assert _decode_size(frames[0]) == (48, 64)    # 首张=整帧锚定
+
+
+def test_motion_crop_single_kf_also_crops(tmp_path):
+    w, _vlm = _worker_with_material(tmp_path, n_kf=1)
+    prompt, frames = w._build_prompt(w._win)
+    assert len(frames) == 1
+    assert "运动区域放大图" in prompt
+    assert _decode_size(frames[-1]) == (36, 48)
+
+
+def test_motion_crop_disabled_keeps_full_frames(tmp_path):
+    w, _vlm = _worker_with_material(tmp_path, cfg={"motion_crop": False}, n_kf=2)
+    prompt, frames = w._build_prompt(w._win)
+    assert len(frames) == 2
+    assert "运动区域放大图" not in prompt
+    assert all(_decode_size(b) == (48, 64) for b in frames)
+
+
+def test_no_motion_events_keeps_full_frames(tmp_path):
+    w, _vlm = _worker_with_material(tmp_path, with_motion=False, n_kf=2)
+    prompt, frames = w._build_prompt(w._win)
+    assert len(frames) == 2
+    assert "运动区域放大图" not in prompt
+
+
+def test_window_merge_keeps_recent_motion_boxes():
+    a, b = _Window(), _Window()
+    for i in range(10):
+        a.motion_boxes.append({"t": float(i), "bbox": [i, 0, 1, 1], "scale": 0.25})
+    b.motion_boxes.append({"t": 99.0, "bbox": [9, 9, 1, 1], "scale": 0.25})
+    a.merge(b)
+    assert len(a.motion_boxes) == 8               # 保尾截断
+    assert a.motion_boxes[-1]["t"] == 99.0        # 最新框在尾部（裁剪取尾部）

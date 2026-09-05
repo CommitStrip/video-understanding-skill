@@ -26,12 +26,16 @@ import threading
 import time
 
 from .rolling_align import RollingAligner
-from .vlm_client import encode_frame_b64, parse_understanding_json
+from .vlm_client import encode_frame_b64, encode_frame_crop_b64, parse_understanding_json
+
+_MOTION_BOXES_MAX = 8         # 窗口运动框保尾上限（裁剪取最近，历史仅辅助）
 
 DEFAULT_CONFIG = {
     "min_call_interval": 8.0,     # 地板间隔（秒），费用上限的直接旋钮
     "max_frames_per_call": 2,     # 单次调用附带关键帧数（控制 token 成本）
     "frame_max_side": 448,        # 关键帧缩略边长
+    "motion_crop": True,          # 运动框裁剪：末张关键帧换区域放大图（False 回整帧行为）
+    "crop_padding": 0.25,         # 裁剪外扩比例（兜住目标位移与框误差）
     "max_timeline": 40,           # timeline 上限（超出压缩成章节）
     "motion_end_trigger_s": 2.0,  # 运动段闭合触发门槛
     "asr_trigger": True,          # 语音段是否触发（静音直播可关）
@@ -46,7 +50,7 @@ DEFAULT_CONFIG = {
 class _Window:
     """一次 VLM 调用的素材窗（采集线程写、调用线程消费）。"""
 
-    __slots__ = ("t0", "t1", "kf", "asr", "motion_n", "retries")
+    __slots__ = ("t0", "t1", "kf", "asr", "motion_n", "motion_boxes", "retries")
 
     def __init__(self):
         self.t0 = None           # 窗口起始素材时间（None=空窗）
@@ -54,6 +58,7 @@ class _Window:
         self.kf = []             # [(t, path)] 按时间序
         self.asr = ""            # 语音文本（累积，按字符截断保尾）
         self.motion_n = 0
+        self.motion_boxes = []   # [{"t", "bbox", "scale"}] 最近运动框（保尾，裁剪用）
         self.retries = 0
 
     def empty(self):
@@ -72,6 +77,7 @@ class _Window:
         self.kf = sorted(set(self.kf + other.kf))[-max_kf:]
         self.add_asr(other.asr, max_asr_chars)
         self.motion_n += other.motion_n
+        self.motion_boxes = (self.motion_boxes + other.motion_boxes)[- _MOTION_BOXES_MAX:]
         self.retries = max(self.retries, other.retries)
         return self
 
@@ -184,6 +190,18 @@ class UnderstandingWorker:
                     # 首帧不算语义事件，其余（scene_change/gradual_drift）强触发
                     if ev.get("reason", "scene_change") != "first_frame":
                         self._triggered = True
+            elif ev_type in ("motion_start", "motion"):
+                boxes = ev.get("boxes") or []
+                with self._win_lock:
+                    if boxes:
+                        main = max(boxes, key=lambda b: b.get("area", 0))
+                        self._win.motion_boxes.append({
+                            "t": float(ev.get("t", 0.0)),
+                            "bbox": list(main.get("bbox", [])),
+                            "scale": float(ev.get("scale", 0.25)),
+                        })
+                        self._win.motion_boxes = \
+                            self._win.motion_boxes[-_MOTION_BOXES_MAX:]
             elif ev_type == "motion_end":
                 duration = float(ev.get("duration") or 0.0)
                 with self._win_lock:
@@ -306,10 +324,27 @@ class UnderstandingWorker:
 
     def _build_prompt(self, win):
         frames_b64 = []
-        for _t, path in win.kf[-self.cfg["max_frames_per_call"]:]:
+        kf_paths = [p for _t, p in win.kf[-self.cfg["max_frames_per_call"]:]]
+        for path in kf_paths:
             b64 = encode_frame_b64(path, max_side=self.cfg["frame_max_side"])
             if b64:
                 frames_b64.append(b64)
+
+        crop_note = ""
+        if self.cfg.get("motion_crop") and win.motion_boxes and kf_paths:
+            # 末槽位整帧 → 最新关键帧×最近运动框的区域放大图（token 中性：
+            # 整帧锚定保留，小目标有效分辨率提升；关 motion_crop 回旧行为）
+            box = win.motion_boxes[-1]
+            crop_b64 = encode_frame_crop_b64(
+                kf_paths[-1], box.get("bbox", []), scale=box.get("scale", 0.25),
+                padding=self.cfg["crop_padding"],
+                max_side=self.cfg["frame_max_side"])
+            if crop_b64:
+                if frames_b64:
+                    frames_b64[-1] = crop_b64
+                else:
+                    frames_b64.append(crop_b64)
+                crop_note = "（末张为运动区域放大图）"
 
         snap = self.state.snapshot()
         rolling = snap["t2"]["now"] or "（首轮，无历史摘要）"
@@ -332,5 +367,5 @@ class UnderstandingWorker:
             f"【新增语音】{asr_text}\n"
             f"【画面活动】本窗运动事件 {win.motion_n} 个"
             + (f"；最新标签（本地毫秒级）：{label_hint}" if label_hint else "")
-            + (f"；附关键帧 {len(frames_b64)} 张" if frames_b64 else "（无图可附）"))
+            + (f"；附关键帧 {len(frames_b64)} 张{crop_note}" if frames_b64 else "（无图可附）"))
         return prompt, frames_b64

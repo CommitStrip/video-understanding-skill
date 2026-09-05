@@ -92,6 +92,50 @@ def encode_frame_b64(path, max_side=448):
         return None
 
 
+def encode_frame_crop_b64(path, box, scale=1.0, padding=0.25, max_side=448):
+    """关键帧图 → 运动框区域裁剪 → 缩略 JPEG base64（内存完成，不落盘）。
+
+    box 为降采样小图坐标 [x, y, w, h]（scale = 小图/原图比例，与事件里的
+    fast_scale 对应）；先换算回原图坐标，按 padding 比例外扩（兜住目标位移
+    与框误差）并 clamp 到图边界，再缩到 max_side。读图失败或无效框返回 None。
+    """
+    import cv2
+    import numpy as np
+    try:
+        buf = np.fromfile(str(path), dtype=np.uint8)  # 只读不写，安全
+        if buf.size == 0:
+            return None
+        img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        if img is None:
+            return None
+    except OSError:
+        return None
+    try:
+        bx, by, bw, bh = (float(v) for v in list(box)[:4])
+    except (TypeError, ValueError):
+        return None
+    if bw <= 0 or bh <= 0:
+        return None
+    s = float(scale) if scale and scale > 0 else 1.0
+    bx, by, bw, bh = bx / s, by / s, bw / s, bh / s
+    ex, ey = bw * float(padding), bh * float(padding)
+    h, w = img.shape[:2]
+    x0 = max(0, round(bx - ex))
+    y0 = max(0, round(by - ey))
+    x1 = min(w, round(bx + bw + ex))
+    y1 = min(h, round(by + bh + ey))
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return None
+    crop = img[y0:y1, x0:x1]
+    ch, cw = crop.shape[:2]
+    if max(ch, cw) > max_side:
+        k = max_side / max(ch, cw)
+        crop = cv2.resize(crop, (max(1, round(cw * k)), max(1, round(ch * k))),
+                          interpolation=cv2.INTER_AREA)
+    ok, jpg = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    return base64.b64encode(jpg.tobytes()).decode("ascii") if ok else None
+
+
 class BaseVLM:
     """VLM 后端统一接口：understand(prompt, frames_b64) -> 回复文本。"""
 
