@@ -213,16 +213,29 @@ class MockVLM(BaseVLM):
         return item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)
 
 
-_BACKENDS = {"openai": OpenAICompatVLM, "mock": MockVLM}
+class OllamaVLM(OpenAICompatVLM):
+    """ollama 本地后端（OpenAI 兼容端点 /v1；机器人本地优先的慎思通道）。
+
+    端点默认 http://localhost:11434/v1（validate_api_base 白名单已放行
+    localhost），模型默认走 VLM_MODEL 环境变量（如 llava / qwen2.5vl）。
+    """
+
+    name = "ollama"
+
+    def __init__(self, model=None, base_url=None, **kwargs):
+        base = (base_url
+                or os.environ.get("OLLAMA_BASE", "http://localhost:11434/v1"))
+        super().__init__(api_base=base, model=model, **kwargs)
+
+
+_BACKENDS = {"openai": OpenAICompatVLM, "mock": MockVLM, "ollama": OllamaVLM}
 
 
 def create_vlm(backend="mock", **kwargs):
-    """按名构造 VLM 后端。ollama 为 W9 预留槽位（本地推理压延迟）。"""
-    if backend == "ollama":
-        raise VLMError("ollama 本地 VLM 后端为 W9 预留，本期请用 openai / mock")
+    """按名构造 VLM 后端（openai / mock / ollama）。"""
     cls = _BACKENDS.get(backend)
     if cls is None:
-        raise VLMError(f"未知 VLM 后端: {backend}（可用: {sorted(_BACKENDS)} / ollama 预留）")
+        raise VLMError(f"未知 VLM 后端: {backend}（可用: {sorted(_BACKENDS)}）")
     return cls(**kwargs)
 
 

@@ -286,3 +286,52 @@ def test_window_merge_keeps_recent_motion_boxes():
     a.merge(b)
     assert len(a.motion_boxes) == 8               # 保尾截断
     assert a.motion_boxes[-1]["t"] == 99.0        # 最新框在尾部（裁剪取尾部）
+
+
+# ---------- W-B ego 钩子：自我运动嫌疑窗口内触发降权 ----------
+
+def test_ego_suspect_keyframe_defers_trigger(tmp_path):
+    bus, state = EventBus(), SessionState()
+    vlm = MockVLM()
+    w = UnderstandingWorker(bus, state, vlm, config={"min_call_interval": 0.0})
+    w._on_event({"type": "keyframe", "t": 1.0, "reason": "scene_change",
+                 "path": _make_kf(tmp_path, "ego1.jpg"), "ego_suspect": True})
+    assert not w._triggered                       # 嫌疑窗口：触发被降权
+    assert w._win.kf                              # 但素材照收（合并语义）
+    w._on_event({"type": "keyframe", "t": 2.0, "reason": "scene_change",
+                 "path": _make_kf(tmp_path, "ok1.jpg"), "ego_suspect": False})
+    assert w._triggered                           # 非嫌疑触发点恢复
+    w._maybe_fire()
+    win = w._win_q.get_nowait()
+    assert len(win.kf) == 2                       # 降权期间的素材不丢
+
+
+def test_ego_suspect_motion_end_defers_trigger(tmp_path):
+    bus, state = EventBus(), SessionState()
+    w = UnderstandingWorker(bus, state, MockVLM(), config={"min_call_interval": 0.0})
+    w._on_event({"type": "motion_end", "t": 3.0, "duration": 3.0,
+                 "boxes": [], "motion_ratio": 0.0, "ego_suspect": True,
+                 "ego_reason": "command_window"})
+    assert w._win.motion_n == 1                   # 计数照常
+    assert not w._triggered                       # 段闭合触发被延迟
+    w._on_event({"type": "motion_end", "t": 9.0, "duration": 2.5,
+                 "boxes": [], "motion_ratio": 0.0, "ego_suspect": False,
+                 "ego_reason": ""})
+    assert w._triggered
+
+
+def test_ego_gate_disabled_keeps_old_behavior(tmp_path):
+    bus, state = EventBus(), SessionState()
+    w = UnderstandingWorker(bus, state, MockVLM(),
+                            config={"min_call_interval": 0.0, "ego_gate": False})
+    w._on_event({"type": "keyframe", "t": 1.0, "reason": "scene_change",
+                 "path": _make_kf(tmp_path), "ego_suspect": True})
+    assert w._triggered                           # 开关关闭：嫌疑照常触发
+
+
+def test_events_without_ego_field_unchanged(tmp_path):
+    bus, state = EventBus(), SessionState()
+    w = UnderstandingWorker(bus, state, MockVLM(), config={"min_call_interval": 0.0})
+    w._on_event({"type": "keyframe", "t": 1.0, "reason": "scene_change",
+                 "path": _make_kf(tmp_path)})     # 无 ego 字段（vus 原生流）
+    assert w._triggered                           # 行为与旧版完全一致

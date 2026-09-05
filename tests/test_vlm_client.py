@@ -60,7 +60,22 @@ def test_mock_vlm_fail_next_and_records_frames():
 def test_create_vlm_registry():
     assert isinstance(create_vlm("mock"), MockVLM)
     with pytest.raises(VLMError):
-        create_vlm("ollama")
+        create_vlm("nope")
+
+
+# ==================== W-B ollama 本地后端 ====================
+
+def test_create_vlm_ollama_uses_local_endpoint():
+    vlm = create_vlm("ollama", model="llava")
+    assert vlm.name == "ollama"
+    assert vlm.model == "llava"
+    assert "localhost:11434" in vlm.api_base          # 本地端点默认值
+
+
+def test_ollama_vlm_roundtrip_local_server(local_api):
+    vlm = create_vlm("ollama", model="m", base_url=local_api)
+    out = vlm.understand("p", frames_b64=("Zg==",))
+    assert json.loads(out)["now"]                     # 本地 HTTP 全链路往返
     with pytest.raises(VLMError):
         create_vlm("nope")
 

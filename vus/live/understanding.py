@@ -38,6 +38,8 @@ DEFAULT_CONFIG = {
     "crop_padding": 0.25,         # 裁剪外扩比例（兜住目标位移与框误差）
     "max_timeline": 40,           # timeline 上限（超出压缩成章节）
     "motion_end_trigger_s": 2.0,  # 运动段闭合触发门槛
+    "ego_gate": True,             # 自我运动嫌疑窗口内降权触发（机器人场景；
+                                  # 事件无 ego_suspect 字段时行为不变）
     "asr_trigger": True,          # 语音段是否触发（静音直播可关）
     "backoff_base": 2.0,          # 失败退避基数（秒）
     "backoff_max": 60.0,
@@ -189,7 +191,11 @@ class UnderstandingWorker:
                     self._win.t1 = max(self._win.t1, float(ev.get("t", 0.0)))
                     # 首帧不算语义事件，其余（scene_change/gradual_drift）强触发
                     if ev.get("reason", "scene_change") != "first_frame":
-                        self._triggered = True
+                        # ego 钩子：自我运动嫌疑窗口内的"场景切换"大概率只是
+                        # 视角转移——素材照收不触发（降权，等非嫌疑触发点）
+                        if not (self.cfg.get("ego_gate", True)
+                                and ev.get("ego_suspect")):
+                            self._triggered = True
             elif ev_type in ("motion_start", "motion"):
                 boxes = ev.get("boxes") or []
                 with self._win_lock:
@@ -207,7 +213,11 @@ class UnderstandingWorker:
                 with self._win_lock:
                     self._win.motion_n += 1
                 if duration >= self.cfg["motion_end_trigger_s"]:
-                    self._triggered = True
+                    # ego 钩子：段闭合瞬间仍在自我运动嫌疑窗口 → 延迟触发
+                    # （素材已在窗口内，后续非嫌疑触发点会取到合并后的最新窗）
+                    if not (self.cfg.get("ego_gate", True)
+                            and ev.get("ego_suspect")):
+                        self._triggered = True
             return
 
         if ev_type == "asr_final":
