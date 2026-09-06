@@ -335,3 +335,96 @@ def test_events_without_ego_field_unchanged(tmp_path):
     w._on_event({"type": "keyframe", "t": 1.0, "reason": "scene_change",
                  "path": _make_kf(tmp_path)})     # 无 ego 字段（vus 原生流）
     assert w._triggered                           # 行为与旧版完全一致
+
+
+# ---------- W-F1 ego 降权超时兜底（防慎思饿死） ----------
+
+class _FakeClock:
+    def __init__(self, start=100.0):
+        self.now = start
+
+    def __call__(self):
+        return self.now
+
+
+def test_ego_defer_cap_forces_trigger_after_timeout(tmp_path):
+    clock = _FakeClock()
+    w = UnderstandingWorker(bus := EventBus(), SessionState(), MockVLM(),
+                            config={"min_call_interval": 0.0,
+                                    "ego_defer_cap_s": 5.0},
+                            clock_fn=clock)
+    w._on_event({"type": "keyframe", "t": 1.0, "reason": "scene_change",
+                 "path": _make_kf(tmp_path, "e1.jpg"), "ego_suspect": True})
+    assert not w._triggered                       # 嫌疑开始：跳过
+    clock.now = 103.0
+    w._on_event({"type": "keyframe", "t": 4.0, "reason": "scene_change",
+                 "path": _make_kf(tmp_path, "e2.jpg"), "ego_suspect": True})
+    assert not w._triggered                       # 降权 3s < cap：仍跳过
+    clock.now = 106.0
+    w._on_event({"type": "keyframe", "t": 7.0, "reason": "scene_change",
+                 "path": _make_kf(tmp_path, "e3.jpg"), "ego_suspect": True})
+    assert w._triggered                           # 降权 6s ≥ cap：兜底放行
+
+
+def test_ego_defer_cap_zero_disables_fallback(tmp_path):
+    clock = _FakeClock()
+    w = UnderstandingWorker(bus := EventBus(), SessionState(), MockVLM(),
+                            config={"min_call_interval": 0.0,
+                                    "ego_defer_cap_s": 0.0},
+                            clock_fn=clock)
+    clock.now = 1000.0                            # 远超任何 cap
+    w._on_event({"type": "keyframe", "t": 1.0, "reason": "scene_change",
+                 "path": _make_kf(tmp_path), "ego_suspect": True})
+    assert not w._triggered                       # cap=0：纯跳过（旧行为）
+
+
+def test_ego_defer_reset_by_clean_event(tmp_path):
+    clock = _FakeClock()
+    w = UnderstandingWorker(bus := EventBus(), SessionState(), MockVLM(),
+                            config={"min_call_interval": 0.0,
+                                    "ego_defer_cap_s": 5.0},
+                            clock_fn=clock)
+    w._on_event({"type": "keyframe", "t": 1.0, "reason": "scene_change",
+                 "path": _make_kf(tmp_path, "a.jpg"), "ego_suspect": True})
+    w._on_event({"type": "keyframe", "t": 2.0, "reason": "scene_change",
+                 "path": _make_kf(tmp_path, "b.jpg"), "ego_suspect": False})
+    assert w._triggered                           # 非嫌疑：正常触发
+    w._maybe_fire()                               # 真实循环此处立即消费窗口
+    assert not w._triggered
+    clock.now = 103.0                             # 距嫌疑起点仅 3s，但已重置
+    w._on_event({"type": "keyframe", "t": 3.0, "reason": "scene_change",
+                 "path": _make_kf(tmp_path, "c.jpg"), "ego_suspect": True})
+    assert not w._triggered                       # 新一轮降权重新计时
+
+
+# ---------- W-F2 本体状态行进慎思素材窗 ----------
+
+def test_ego_state_enters_window_and_prompt(tmp_path):
+    bus, state = EventBus(), SessionState()
+    w = UnderstandingWorker(bus, state, MockVLM(), config={"min_call_interval": 0.0})
+    w._on_event({"type": "ego_state", "t": 0.5, "line": "直行 0.60m/s"})
+    assert w._win.proprio_line == "直行 0.60m/s"
+    w._on_event({"type": "keyframe", "t": 1.0, "reason": "scene_change",
+                 "path": _make_kf(tmp_path), "ego_suspect": False})
+    prompt, _frames = w._build_prompt(w._win)
+    assert "【本体状态】直行 0.60m/s" in prompt
+
+
+def test_ego_state_absent_prompt_unchanged(tmp_path):
+    bus, state = EventBus(), SessionState()
+    w = UnderstandingWorker(bus, state, MockVLM(), config={"min_call_interval": 0.0})
+    w._on_event({"type": "keyframe", "t": 1.0, "reason": "scene_change",
+                 "path": _make_kf(tmp_path), "ego_suspect": False})
+    prompt, _frames = w._build_prompt(w._win)
+    assert "【本体状态】" not in prompt            # 无本体流：prompt 与旧版一致
+
+
+def test_window_merge_keeps_latest_proprio_line():
+    a, b = _Window(), _Window()
+    a.proprio_line = "旧"
+    b.proprio_line = "新"
+    a.merge(b)
+    assert a.proprio_line == "新"
+    c = _Window()                                 # 空行不覆盖
+    a.merge(c)
+    assert a.proprio_line == "新"

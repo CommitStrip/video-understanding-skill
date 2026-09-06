@@ -40,6 +40,9 @@ DEFAULT_CONFIG = {
     "motion_end_trigger_s": 2.0,  # 运动段闭合触发门槛
     "ego_gate": True,             # 自我运动嫌疑窗口内降权触发（机器人场景；
                                   # 事件无 ego_suspect 字段时行为不变）
+    "ego_defer_cap_s": 30.0,      # 嫌疑降权的超时兜底（秒）：持续嫌疑超过该
+                                  # 时长后强制放行一次触发，防慎思饿死；0=纯
+                                  # 跳过无兜底（旧行为）
     "asr_trigger": True,          # 语音段是否触发（静音直播可关）
     "backoff_base": 2.0,          # 失败退避基数（秒）
     "backoff_max": 60.0,
@@ -52,7 +55,8 @@ DEFAULT_CONFIG = {
 class _Window:
     """一次 VLM 调用的素材窗（采集线程写、调用线程消费）。"""
 
-    __slots__ = ("t0", "t1", "kf", "asr", "motion_n", "motion_boxes", "retries")
+    __slots__ = ("t0", "t1", "kf", "asr", "motion_n", "motion_boxes",
+                 "proprio_line", "retries")
 
     def __init__(self):
         self.t0 = None           # 窗口起始素材时间（None=空窗）
@@ -61,6 +65,7 @@ class _Window:
         self.asr = ""            # 语音文本（累积，按字符截断保尾）
         self.motion_n = 0
         self.motion_boxes = []   # [{"t", "bbox", "scale"}] 最近运动框（保尾，裁剪用）
+        self.proprio_line = ""   # 本体状态文本行（机器人桥 ego_state 事件注入）
         self.retries = 0
 
     def empty(self):
@@ -80,6 +85,8 @@ class _Window:
         self.add_asr(other.asr, max_asr_chars)
         self.motion_n += other.motion_n
         self.motion_boxes = (self.motion_boxes + other.motion_boxes)[- _MOTION_BOXES_MAX:]
+        if other.proprio_line:
+            self.proprio_line = other.proprio_line   # 本体状态保最新非空
         self.retries = max(self.retries, other.retries)
         return self
 
@@ -105,6 +112,7 @@ class UnderstandingWorker:
         self._win_q = queue.Queue(maxsize=1)
         self._in_flight = threading.Event()
         self._last_call_clock = float("-inf")
+        self._ego_defer_since = None          # 嫌疑降权起始时刻（采集线程）
         self._err_streak = 0
 
         self._stop_evt = threading.Event()
@@ -171,11 +179,38 @@ class UnderstandingWorker:
             if self._triggered:
                 self._maybe_fire()
 
+    def _ego_should_defer(self, ev) -> bool:
+        """自我运动嫌疑降权判定（采集线程专用）。
+
+        嫌疑 → 跳过触发；但持续嫌疑超过 ego_defer_cap_s 后强制放行一次
+        （防持续导航下慎思饿死）。非嫌疑事件重置降权计时。
+        ego_defer_cap_s=0 表示纯跳过无兜底（旧行为）。
+        """
+        if not (self.cfg.get("ego_gate", True) and ev.get("ego_suspect")):
+            self._ego_defer_since = None
+            return False
+        cap = float(self.cfg.get("ego_defer_cap_s", 30.0))
+        if cap <= 0:
+            return True
+        now = self._clock()
+        if self._ego_defer_since is None:
+            self._ego_defer_since = now
+            return True
+        if now - self._ego_defer_since >= cap:
+            self._ego_defer_since = None       # 兜底放行一次并重置计时
+            return False
+        return True
+
     def _on_event(self, ev):
         ev_type = ev.get("type", "")
 
         if ev_type == "tag":                       # T0.5 标签（管线侧打好的）
             self.state.apply_label(ev)
+            return
+
+        if ev_type == "ego_state":                 # 本体状态文本行（机器人桥）
+            with self._win_lock:
+                self._win.proprio_line = str(ev.get("line", ""))
             return
 
         if ev_type in ("motion_start", "motion", "motion_end", "keyframe"):
@@ -192,9 +227,9 @@ class UnderstandingWorker:
                     # 首帧不算语义事件，其余（scene_change/gradual_drift）强触发
                     if ev.get("reason", "scene_change") != "first_frame":
                         # ego 钩子：自我运动嫌疑窗口内的"场景切换"大概率只是
-                        # 视角转移——素材照收不触发（降权，等非嫌疑触发点）
-                        if not (self.cfg.get("ego_gate", True)
-                                and ev.get("ego_suspect")):
+                        # 视角转移——素材照收不触发；降权持续超过兜底时长则
+                        # 强制放行（防持续导航下慎思饿死，语义永远不更新）
+                        if not self._ego_should_defer(ev):
                             self._triggered = True
             elif ev_type in ("motion_start", "motion"):
                 boxes = ev.get("boxes") or []
@@ -214,9 +249,8 @@ class UnderstandingWorker:
                     self._win.motion_n += 1
                 if duration >= self.cfg["motion_end_trigger_s"]:
                     # ego 钩子：段闭合瞬间仍在自我运动嫌疑窗口 → 延迟触发
-                    # （素材已在窗口内，后续非嫌疑触发点会取到合并后的最新窗）
-                    if not (self.cfg.get("ego_gate", True)
-                            and ev.get("ego_suspect")):
+                    # （素材已在窗口内；降权超兜底时长则强制放行防饿死）
+                    if not self._ego_should_defer(ev):
                         self._triggered = True
             return
 
@@ -375,7 +409,8 @@ class UnderstandingWorker:
             f"【当前滚动摘要】{rolling}\n"
             f"【已知实体】{entities}\n"
             f"【新增语音】{asr_text}\n"
-            f"【画面活动】本窗运动事件 {win.motion_n} 个"
+            + (f"【本体状态】{win.proprio_line}\n" if win.proprio_line else "")
+            + f"【画面活动】本窗运动事件 {win.motion_n} 个"
             + (f"；最新标签（本地毫秒级）：{label_hint}" if label_hint else "")
             + (f"；附关键帧 {len(frames_b64)} 张{crop_note}" if frames_b64 else "（无图可附）"))
         return prompt, frames_b64
