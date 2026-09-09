@@ -7,7 +7,7 @@
 [![CI](https://github.com/CommitStrip/video-understanding-skill/actions/workflows/ci.yml/badge.svg)](https://github.com/CommitStrip/video-understanding-skill/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![GitHub tag](https://img.shields.io/github/v/tag/CommitStrip/video-understanding-skill)](https://github.com/CommitStrip/video-understanding-skill/tags)
-[![Tests](https://img.shields.io/badge/tests-203%20passed-brightgreen)](https://github.com/CommitStrip/video-understanding-skill/actions)
+[![Tests](https://img.shields.io/badge/tests-250%2B%20passed-brightgreen)](https://github.com/CommitStrip/video-understanding-skill/actions)
 
 **把视频压缩成 LLM 读得懂的样子 · Compress video into what an LLM can actually read**
 
