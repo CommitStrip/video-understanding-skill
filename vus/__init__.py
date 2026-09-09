@@ -14,7 +14,7 @@
     python -m vus.live --video x.mp4 --realtime --vlm mock --serve
 """
 
-__version__ = "0.5.0"
+__version__ = "1.0.0"
 
 from .smart_pipeline import SmartPipeline
 from .integrated_pipeline import run_realtime_pipeline
