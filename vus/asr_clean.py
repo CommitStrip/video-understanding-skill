@@ -74,6 +74,38 @@ def filter_hallucinations(segments):
     return [s for s in segments if not s.get("hallucination")]
 
 
+# ==================== 注意力回链（W9 借鉴外部审查：跨模态反向保留） ====================
+
+# 语言注意力线索：说话人引导观众看画面特定位置/记住要点时，对应画面区间
+# 应提升保留优先级（跨模态反向触发：语言 → 视觉）
+ATTENTION_CUES = ("注意看", "重点", "看这里", "记住", "大家看", "注意",
+                  "look at", "pay attention", "important", "watch")
+
+
+def detect_attention_windows(segments, merge_gap_s=5.0):
+    """扫描 ASR 段中的注意力线索，合并相邻命中为注意力窗口。
+
+    返回 [{"t", "end", "cue"}]（按时间序）；幻觉段跳过。
+    """
+    hits = []
+    for s in segments:
+        if s.get("hallucination"):
+            continue
+        text = s.get("text", "")
+        for cue in ATTENTION_CUES:
+            if cue.lower() in text.lower():
+                t = s.get("t", 0.0)
+                hits.append({"t": t, "end": s.get("end_t", t), "cue": cue})
+                break
+    windows = []
+    for h in sorted(hits, key=lambda x: x["t"]):
+        if windows and h["t"] - windows[-1]["end"] <= merge_gap_s:
+            windows[-1]["end"] = max(windows[-1]["end"], h["end"])
+        else:
+            windows.append(dict(h))
+    return windows
+
+
 class RollingCleaner:
     """clean_asr_segments 的增量版（W8 直播链路）：跨 feed 保持相邻去重状态。
 

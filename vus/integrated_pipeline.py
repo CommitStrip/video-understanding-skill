@@ -117,9 +117,36 @@ def _asr_job(video_path, wav_path, out_segments, sr=16000, mode="auto"):
     out_segments.extend(clean_asr_segments(segs))
 
 
+def prune_keyframes(keyframes_dir, max_mb):
+    """关键帧磁盘 retention：超配额时按文件名序（=时间序）删除最旧帧。
+
+    返回删除的文件数；配额内不动（默认 0=关闭）。
+    """
+    quota = int(max_mb * 1024 * 1024)
+    files = []
+    total = 0
+    for name in sorted(os.listdir(keyframes_dir)):
+        if not (name.startswith("kf_") and name.endswith(".jpg")):
+            continue
+        p = os.path.join(keyframes_dir, name)
+        size = os.path.getsize(p)
+        files.append((p, size))
+        total += size
+    if total <= quota:
+        return 0
+    removed = 0
+    for p, size in files:
+        if total <= quota:
+            break
+        os.remove(p)
+        total -= size
+        removed += 1
+    return removed
+
+
 def run_realtime_pipeline(video_path=None, output_dir=None, save_keyframes=True,
                           config=None, on_event=None, source: FrameSource = None,
-                          ocr=False):
+                          ocr=False, max_keyframe_mb=0):
     """
     实时流式主流程：画面链前台逐帧 + 声音链后台并行。
 
@@ -269,11 +296,18 @@ def run_realtime_pipeline(video_path=None, output_dir=None, save_keyframes=True,
     proc_fps = frame_idx / pipeline_time if pipeline_time > 0 else 0
 
     # 等待后台声音链完成（中断时也等，保证部分结果完整）
+    attention_windows = []
     if asr_thread is not None:
         try:
             asr_thread.join()
         except KeyboardInterrupt:
             pass
+
+    # W9 注意力回链：ASR 语言线索（"注意看/重点"）→ 注意力窗口
+    # （供 Tier3 强制纳入与下游 LLM 参考；跨模态反向保留）
+    if asr_segments:
+        from .asr_clean import detect_attention_windows
+        attention_windows = detect_attention_windows(asr_segments)
 
     mode = "画面链（中断）" if interrupted else "画面链"
     print(f"\n[Pipeline] {mode}完成: {frame_idx}帧, 耗时{pipeline_time:.1f}s, "
@@ -314,6 +348,7 @@ def run_realtime_pipeline(video_path=None, output_dir=None, save_keyframes=True,
         "aligned_segments": aligned,
         "asr_segments": asr_segments,
         "ocr_events": ocr_events,
+        "attention_windows": attention_windows,
         "pipeline_summary": summary,
         "stream_event_count": consumer.snapshot()["event_count"]
     })
@@ -341,6 +376,13 @@ def run_realtime_pipeline(video_path=None, output_dir=None, save_keyframes=True,
     print(f"{'='*60}")
     if interrupted:
         print("[Pipeline] 收到中断，已保存部分结果")
+
+    # W9 关键帧磁盘 retention：超配额按时间序删最旧（默认 0=关闭）
+    if max_keyframe_mb > 0 and save_keyframes:
+        removed = prune_keyframes(keyframes_dir, max_keyframe_mb)
+        if removed:
+            print(f"[Pipeline] 磁盘 retention: 移除最旧关键帧 {removed} 张"
+                  f"（配额 {max_keyframe_mb}MB）")
 
     return pipe, aligned, asr_segments
 
@@ -373,6 +415,8 @@ def main():
     parser.add_argument('--no-keyframes', action='store_true', help='不保存关键帧图片')
     parser.add_argument('--fast-scale', type=float, default=0.25, help='快系统降采样比例')
     parser.add_argument('--kf-hz', type=float, default=1.5, help='慢系统关键帧频率(Hz)')
+    parser.add_argument('--max-keyframe-mb', type=float, default=0,
+                        help='关键帧目录磁盘配额(MB, 0=关闭): 超配额按时间序删最旧帧')
     parser.add_argument('--source', choices=['file', 'cam', 'rtsp'], default='file',
                         help='帧源类型: file=视频文件(默认,向后兼容) / cam=摄像头 / rtsp=网络流')
     parser.add_argument('--camera', type=int, default=0, help='摄像头索引（--source cam 时使用）')
@@ -407,7 +451,8 @@ def main():
             save_keyframes=not args.no_keyframes,
             config=config,
             source=source,
-            ocr=args.ocr
+            ocr=args.ocr,
+            max_keyframe_mb=args.max_keyframe_mb
         )
     except KeyboardInterrupt:
         # 兜底：中断发生在帧循环之外（如对齐/落盘阶段）。

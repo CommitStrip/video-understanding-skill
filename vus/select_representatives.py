@@ -366,6 +366,38 @@ def build_context(representatives, kf_dir, sources=None, out_context=None):
     return text
 
 
+def force_include_attention_windows(reps, kfs, windows, pad_s=5.0):
+    """W9 注意力回链：每个注意力窗口内（含前后 pad）最近的未选关键帧强制保留。
+
+    reps: [{"t","path"}]；kfs: [(t, path)]（load_keyframes 输出）；
+    windows: [{"t", "end"}]（detect_attention_windows 输出）。
+    跨模态反向保留：语言线索（"注意看/重点"）出现时，对应画面区间的关键帧
+    不得因预算/桶约束而缺席。返回按时间序的新列表（不改入参）。
+    """
+    out = list(reps)
+    sel_ts = {r["t"] for r in out}
+    added = set()
+    for w in windows:
+        t0 = float(w.get("t", 0.0)) - pad_s
+        t1 = float(w.get("end", w.get("t", 0.0))) + pad_s
+        candidates = [k for k in kfs if t0 <= k[0] <= t1]
+        if not candidates:
+            continue
+        target = float(w.get("t", 0.0))
+        nearest_t, nearest_p = min(candidates, key=lambda k: abs(k[0] - target))
+        # 已选帧附近（±0.05s）视为已覆盖
+        if any(abs(r["t"] - nearest_t) < 0.05 for r in out):
+            continue
+        entry = {"t": round(nearest_t, 1), "path": nearest_p}
+        if any(abs(r["t"] - entry["t"]) < 0.05 and r["path"] == entry["path"]
+               for r in out):
+            continue
+        out.append(entry)
+        added.add(entry["t"])
+    out.sort(key=lambda r: r["t"])
+    return out
+
+
 def summarize(kf_dir):
     """打印关键帧数量与时间分布，便于判断是否需要压缩。"""
     kfs = load_keyframes(kf_dir)
@@ -413,6 +445,9 @@ def main():
                          "并生成 3x3 联系表与 token 估算（借鉴 crv 的 token 成本设计）")
     ap.add_argument("--llm-max-width", type=int, default=640,
                     help="LLM 导出图的宽度上限(默认 640px)")
+    ap.add_argument("--attention-windows", default=None, metavar="FILE",
+                    help="注意力窗口 JSON（[{t, end}]，来自管线 aligned_output 的 "
+                         "attention_windows）：窗口内最近关键帧强制纳入（W9 跨模态反向保留）")
     ap.add_argument("--out", default=None, help="输出代表帧 JSON 路径")
     ap.add_argument("--report", default=None, help="输出 LLM 上下文 Markdown 路径")
     args = ap.parse_args()
@@ -460,6 +495,16 @@ def main():
     mode = f"k={args.k}" + (", adaptive" if args.adaptive else "")
     print(f"[Select] 语义代表帧: {len(reps)} 张 ({mode}, interval={interval:.1f}s) "
           f"(压缩到 {len(reps)/info['count']*100:.1f}%)")
+
+    # W9 注意力回链：ASR 语言线索窗口内的关键帧强制纳入（跨模态反向保留）
+    if args.attention_windows:
+        with open(args.attention_windows, encoding="utf-8") as f:
+            windows = json.load(f)
+        before = len(reps)
+        reps = force_include_attention_windows(reps, load_keyframes(args.keyframes),
+                                               windows)
+        print(f"[Select] 注意力回链: 窗口 {len(windows)} 个, "
+              f"强制纳入 {len(reps) - before} 张, 总计 {len(reps)} 张")
 
     if args.llm_export:
         from .llm_export import export_llm_pack

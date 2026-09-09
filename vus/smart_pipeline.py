@@ -63,6 +63,19 @@ class SmartPipeline:
         self.drift_soft_ratio = cfg.get('drift_soft_ratio', 0.6)
         self.drift_soft_window_s = cfg.get('drift_soft_window_s', 30.0)
 
+        # === 全局运动补偿（借鉴外部审查建议；默认关，按需开启）===
+        # 手持/车载/机器人等已知运动相机的素材下，帧差被全局镜头运动淹没时开启。
+        # 仅在面积门控已触发时执行 ORB+RANSAC 全局运动估计：高内点且 warp 残差低
+        # → 判为纯镜头运动并抑制事件。
+        # 默认关闭的原因（原理性局限）：特征贫乏场景（纯背景+单个移动目标）里，
+        # 目标自身特征的整体平移与镜头运动在特征层不可区分，开启会误杀真实目标运动。
+        self.motion_compensation = cfg.get('motion_compensation', False)
+        self.motion_comp_inlier = cfg.get('motion_comp_inlier', 0.7)
+        self.motion_comp_residual = cfg.get('motion_comp_residual', 4.0)
+        # 显著全局位移门槛（补偿图 320×240 上的像素）：低于它不算镜头运动——
+        # 静止内容帧间本无位移，若不加此门槛会把场景切换信号误判为镜头运动吞掉
+        self.motion_comp_min_translation = cfg.get('motion_comp_min_translation', 2.0)
+
         # === 快系统状态 ===
         self.prev_small = None
         self._gray_hist = deque(maxlen=max(self.motion_window, 2))  # 时间窗口：慢速运动参考
@@ -81,6 +94,8 @@ class SmartPipeline:
         self._drift_hist = deque(maxlen=max(self.drift_window_checks,
                                             self.drift_confirm_checks))
         self._soft_checks = deque()    # (timestamp, score)：软车道时间窗
+        self._segment_had_kf = False   # 当前运动段内慢系统是否已采纳关键帧
+        self._prev_comp_gray = None    # 上一帧的补偿判定用灰度中间图（320×240）
 
         # === 输出（流式累积）===
         # max_events: 事件内存上限（长视频/长直播防泄漏，W1 修复：原 list 无限增长，
@@ -115,13 +130,20 @@ class SmartPipeline:
             small_color = frame
         small_gray = cv2.cvtColor(small_color, cv2.COLOR_BGR2GRAY)
         self.fast_small_size = small_gray.shape
+        # W9 全局运动补偿用中间灰度图（固定 320×240，ORB 特征充足）
+        comp_gray = None
+        if self.motion_compensation:
+            comp_gray = cv2.cvtColor(
+                cv2.resize(frame, (320, 240), interpolation=cv2.INTER_AREA),
+                cv2.COLOR_BGR2GRAY)
 
         out_events = []
 
         # === 快系统：每帧帧差法（最轻，占主要预算）===
         if self.prev_small is not None:
-            out_events += self._fast_motion(small_gray, timestamp)
+            out_events += self._fast_motion(small_gray, timestamp, comp_gray)
         self.prev_small = small_gray
+        self._prev_comp_gray = comp_gray
         self._gray_hist.append(small_gray)
 
         # === 慢系统：低频 + 触发式关键帧（插空跑）===
@@ -129,6 +151,7 @@ class SmartPipeline:
             kf = self._slow_keyframe(small_gray, small_color, timestamp)
             if kf:
                 out_events.append(kf)
+                self._segment_had_kf = True  # 段内已有慢系统采纳的关键帧
 
         # 流式返回 + 累积到历史（供摘要 / 对齐层使用；超过 max_events 自动丢最旧）
         if out_events:
@@ -142,7 +165,7 @@ class SmartPipeline:
 
     # ==================== 快系统 ====================
 
-    def _fast_motion(self, gray, timestamp):
+    def _fast_motion(self, gray, timestamp, comp_gray=None):
         """快系统：帧差法 + 时间累积窗口 + 语义门控 + 状态机流式事件发射（全部在降采样小图上）"""
         events = []
         h, w = gray.shape
@@ -182,6 +205,14 @@ class SmartPipeline:
 
         motion_ratio = total_area / (h * w) if h * w > 0 else 0
 
+        if boxes and self.motion_compensation and comp_gray is not None \
+                and self._prev_comp_gray is not None:
+            # 全局运动补偿：面积门控已触发才执行（安静路径零开销）。
+            # 高内点单应性 + 低 warp 残差 = 纯镜头运动（手持平移/摇镜），
+            # 抑制事件；残差高 = 存在真实前景变化，正常放行。
+            if self._global_motion_verdict(self._prev_comp_gray, comp_gray) == "camera":
+                boxes = []
+
         if boxes:
             # 语义门控：运动区域占比过小（如说话头部微动）视为低语义，不发事件
             max_box_area = max(b["area"] for b in boxes)
@@ -194,6 +225,7 @@ class SmartPipeline:
                 # 运动开始
                 self.motion_active = True
                 self.motion_start_t = timestamp
+                self._segment_had_kf = False
                 self.current_segment = {
                     "start": round(timestamp, 3),
                     "end": round(timestamp, 3),
@@ -228,6 +260,21 @@ class SmartPipeline:
                     duration = self.current_segment["end"] - self.current_segment["start"]
                     if duration >= 0.5:
                         self.motion_segments.append(self.current_segment)
+                    # 锚点保障：段内慢系统零采纳时，补发段锚点关键帧
+                    # （损失下界：任何运动段至少保留 1 帧证据）
+                    if not self._segment_had_kf:
+                        anchor = {
+                            "type": "keyframe",
+                            "t": round(timestamp, 3),
+                            "frame_idx": self.frame_count,
+                            "reason": "segment_anchor",
+                        }
+                        self.keyframes.append({
+                            "t": anchor["t"],
+                            "frame_idx": self.frame_count,
+                            "reason": "segment_anchor",
+                        })
+                        events.append(anchor)
                     events.append({
                         "type": "motion_end",
                         "t": round(timestamp, 3),
@@ -236,6 +283,38 @@ class SmartPipeline:
                 self.current_segment = None
 
         return events
+
+    def _global_motion_verdict(self, prev, cur):
+        """ORB+RANSAC 全局运动判定（在 320×240 中间灰度图上）。
+
+        返回 "camera"（纯镜头运动，高内点单应性 + 低 warp 残差）、
+        "foreground"（存在真实前景变化）或 "unknown"（特征不足，无法判定）。
+        """
+        orb = cv2.ORB_create(nfeatures=500)
+        k1, d1 = orb.detectAndCompute(prev, None)
+        k2, d2 = orb.detectAndCompute(cur, None)
+        if d1 is None or d2 is None or len(k1) < 8 or len(k2) < 8:
+            return "unknown"
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        matches = bf.match(d1, d2)
+        if len(matches) < 8:
+            return "unknown"
+        src = np.float32([k1[m.queryIdx].pt for m in matches])
+        dst = np.float32([k2[m.trainIdx].pt for m in matches])
+        h_mat, inl = cv2.findHomography(src, dst, cv2.RANSAC, 4.0)
+        if h_mat is None or inl is None:
+            return "unknown"
+        # 无显著全局位移（tx/ty 近零）→ 不是镜头运动（内容静止或场景切换信号）
+        translation = float(np.hypot(h_mat[0, 2], h_mat[1, 2]))
+        if translation < self.motion_comp_min_translation:
+            return "foreground"
+        if float(inl.sum()) / len(inl) < self.motion_comp_inlier:
+            return "foreground"
+        warped = cv2.warpPerspective(prev, h_mat, (cur.shape[1], cur.shape[0]))
+        residual = float(np.mean(cv2.absdiff(warped, cur)))
+        if residual < self.motion_comp_residual:
+            return "camera"
+        return "foreground"
 
     def _should_check_keyframe(self, timestamp):
         """慢系统触发决策：低频 + 快系统报有内容"""
