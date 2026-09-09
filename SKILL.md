@@ -9,18 +9,83 @@ description: "把视频（尤其直播课程、讲座、长视频）变成结构
 
 ## 前置条件
 
-1. 依赖：`pip install -e .`（或直接跑——`scripts/` 下的旧命令入口内置了路径兜底，无需安装）。必需 `opencv-python`、`numpy`；ffmpeg 用于抽音频。
-2. **真字幕**（默认开箱即用）：`pip install sherpa-onnx` 后，首次运行缺模型会
-   自动从官方源下载（约 490MB，一次性；`VUS_ASR_AUTO_DOWNLOAD=0` 关闭）。
-   也可手动下载到 `models/sherpa/`：
-   ```bash
-   curl -L -o - https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2 | tar -xj -C models/sherpa --strip-components=1
-   ```
-   模型目录可用环境变量 `VUS_SHERPA_MODELS` 指定。
-   🔴 **警告：sherpa-onnx 未安装或自动下载被关闭且模型缺失时，字幕是
-   "mock 占位假文本"（固定提示语，非真实内容）——禁止把 mock 字幕当作
-   真实转写交付给用户**，必须在报告里注明字幕缺失。
-3. 可选增强：`pip install -e ".[clip]"` + `bash scripts/download_clip_onnx.sh`（CLIP 语义选帧，权重目录 `VUS_CLIP_MODELS`）；`pip install -e ".[ocr]"` + 管线 `--ocr`（花字/内嵌字幕提取，Tier3 定点执行）。
+### 必装（安装技能时一起完成，无选择）
+
+```bash
+pip install -e ".[asr]"
+```
+
+这会安装 sherpa-onnx + 自动下载 **SenseVoice int8 离线模型**（166MB，
+sherpa-onnx 官方源或 CommitStrip/vus-models mirror，首次运行自动下载）。
+这是文件转写的**默认 ASR 通道**——没有它字幕退化为 mock 假文本，管线不可用。
+
+安装命令拆解：
+```bash
+pip install -e . && pip install sherpa-onnx
+# 模型自动下载（首次运行时触发，166MB，一次性）
+```
+
+🔴 **警告：sherpa-onnx 未安装或自动下载被关闭且模型缺失时，字幕是
+"mock 占位假文本"（固定提示语，非真实内容）——禁止把 mock 字幕当作
+真实转写交付给用户**，必须在报告里注明字幕缺失。
+
+### 选装（agent 必须询问用户，附优缺点）
+
+以下模型**不随技能自动安装**。agent 在首次遇到对应场景时应向用户说明
+优缺点，由用户决定是否安装：
+
+<details>
+<summary>🔍 CLIP 语义选帧（--clip）</summary>
+
+```bash
+pip install -e ".[clip]" && bash scripts/download_clip_onnx.sh
+```
+
+| | |
+|---|---|
+| ✅ 优点 | 桶内选帧从"像素变化最大"升级为"语义最相关"——多人轮换/复杂场景代表帧质量提升 |
+| ❌ 缺点 | 额外下载 ~600MB ONNX 模型；每张候选帧推理 ~370ms（CPU）；体积大 |
+| 适用 | 讲座/课程/会议等语义密集型内容 |
+| 不适用 | 运动类/快节奏视频（像素差分已足够） |
+</details>
+
+<details>
+<summary>📝 OCR 花字通道（--ocr）</summary>
+
+```bash
+pip install -e ".[ocr]"
+# 管线加 --ocr
+```
+
+| | |
+|---|---|
+| ✅ 优点 | 提取画面内嵌文字（课件标题/花字/双语字幕）——对理解"画面上写了什么"至关重要 |
+| ❌ 缺点 | 额外安装 rapidocr-onnxruntime；密集文字视频 OCR 耗时增加（仅 Tier3 代表帧，不影响管线速度） |
+| 适用 | 课件/字幕/含文字画面的视频 |
+| 不适用 | 纯风景/无文字画面 |
+</details>
+
+<details>
+<summary>📡 流式 zipformer ASR（直播场景）</summary>
+
+```bash
+pip install sherpa-onnx
+# 模型自动下载（约 490MB）
+```
+
+| | |
+|---|---|
+| ✅ 优点 | 实时逐词转写（词级时间戳），RTSP/摄像头直播场景唯一选择 |
+| ❌ 缺点 | 额外下载 ~490MB（比离线 SenseVoice 大 3 倍）；流式上下文短 → 中文专名错字多于离线 |
+| 适用 | RTSP 直播流 / 摄像头实时理解 |
+| 不适用 | 文件转写（已有更好的离线 SenseVoice） |
+
+模型目录可用环境变量 `VUS_SHERPA_MODELS` 指定。
+</details>
+
+> **Agent 行为规范**：安装技能时执行"必装"部分的命令。遇到 CLIP/OCR/直播
+> 场景时，向用户展示上面对照表并询问是否安装。用户拒绝时不安装、不影响
+> 核心功能，但在产出报告中注明"XX 增强未启用"。
 
 ## 工作流
 
