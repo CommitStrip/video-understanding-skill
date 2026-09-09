@@ -30,6 +30,23 @@ OFFLINE_ASR_SUBDIR = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09"
 # 下载允许的官方主机白名单（含 release 资产重定向目标）
 _ALLOWED_HOSTS = {"github.com", "objects.githubusercontent.com", "codeload.github.com"}
 
+# 多源 fallback 下载链：官方源 → 自建源（vus-models 仓库）
+# 两个源提供相同的模型文件，任一可用即可。
+OFFLINE_ASR_SOURCES = [
+    # 官方源（sherpa-onnx releases）
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+    "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2",
+    # 自建源（CommitStrip/vus-models 仓库，int8 精简包）
+    "https://github.com/CommitStrip/vus-models/releases/download/v1.0/sense-voice-int8.tar.bz2",
+]
+STREAMING_ASR_SOURCES = [
+    # 官方源（sherpa-onnx releases，完整包含 fp32+int8）
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+    "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2",
+    # 自建源（int8 精简包，体积 490→170MB）
+    "https://github.com/CommitStrip/vus-models/releases/download/v1.0/streaming-zipformer-int8.tar.bz2",
+]
+
 
 def _validate_url(url):
     """下载前校验：仅允许 https 且 host 在官方白名单（防 SSRF，CWE-918）。"""
@@ -68,34 +85,51 @@ def find_asr_model(model_dir=None):
     return None
 
 
-def download_asr_model(dest_dir=None):
-    """经系统 curl 下载官方 ASR 模型并解压到 dest_dir（默认 ./models/sherpa）。
+def _download_from_sources(sources, dest_dir, label):
+    """多源 fallback 下载：按顺序尝试每个 URL，任一成功即返回。
 
-    返回模型子目录路径字符串；失败打印原因返回 None。
+    sources: [URL 字符串]；dest_dir: 解压目标目录；label: 打印标签。
     """
-    _validate_url(ASR_MODEL_URL)
-    dest = Path(dest_dir) if dest_dir else asr_models_dir()
+    dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
-    archive = str(dest) + "/asr-model.tar.bz2"
-    print(f"[ASR] 模型未找到，开始自动下载（约 490MB，一次性）")
-    try:
-        subprocess.run(
-            ["curl", "-L", "--fail", "--retry", "3",
-             "-o", archive, ASR_MODEL_URL],
-            check=True,
-        )
-        print("[ASR] 下载完成，解压中…")
-        with tarfile.open(archive, "r:bz2") as tf:
-            tf.extractall(dest, filter="data")  # filter 防 tar 路径穿越
-        Path(archive).unlink()
-        sub = dest / "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20"
-        return str(sub if sub.is_dir() else dest)
-    except Exception as e:  # 网络/磁盘/解压失败都走显式降级
-        print(f"[ASR] 自动下载失败: {e}")
-        print("[ASR] 可手动下载后解压到 models/sherpa/，或设 VUS_ASR_AUTO_DOWNLOAD=0 跳过")
-        if Path(archive).exists():
+    for url in sources:
+        _validate_url(url)
+        archive = str(dest) + "/model-download.tar.bz2"
+        size_hint = "166MB" if "sense-voice" in url.lower() else "490MB"
+        print(f"[ASR] {label}: 尝试下载（约 {size_hint}）…")
+        try:
+            subprocess.run(
+                ["curl", "-L", "--fail", "--retry", "2",
+                 "-o", archive, url],
+                check=True,
+            )
+            print(f"[ASR] 下载完成，解压中…")
+            with tarfile.open(archive, "r:bz2") as tf:
+                tf.extractall(dest, filter="data")
             Path(archive).unlink()
-        return None
+            # 解压后扫描 dest 目录找到包含 tokens.txt + model/encoder onnx 的子目录
+            for root, _dirs, files in os.walk(str(dest)):
+                has_tokens = "tokens.txt" in files
+                has_model = any(f.endswith(".onnx") for f in files)
+                if has_tokens and has_model:
+                    print(f"[ASR] 模型就位: {root}")
+                    return root
+            return str(dest)  # 找到但结构不同，仍返回解压目录
+        except Exception as e:
+            print(f"[ASR] 下载源失败({url.split('/')[-1]}): {e}")
+            if Path(archive).exists():
+                Path(archive).unlink()
+    return None
+
+
+def download_asr_model(dest_dir=None):
+    """多源下载流式 ASR 模型到 dest_dir（默认 ./models/sherpa）。
+
+    下载链: 官方 sherpa-onnx release → CommitStrip/vus-models mirror。
+    返回模型目录路径字符串；全部失败返回 None。
+    """
+    return _download_from_sources(STREAMING_ASR_SOURCES,
+                                  dest_dir or asr_models_dir(), "流式 ASR")
 
 
 def ensure_asr_model(model_dir=None, auto=None):
@@ -146,33 +180,13 @@ def find_offline_asr_model(model_dir=None):
 
 
 def download_offline_asr_model(dest_dir=None):
-    """经系统 curl 下载 SenseVoice 离线模型并解压（约 166MB）。
+    """多源下载 SenseVoice 离线模型（166MB int8）。
 
-    返回模型目录字符串；失败打印原因返回 None。
+    下载链: 官方 sherpa-onnx release → CommitStrip/vus-models mirror。
+    返回模型目录字符串；全部失败返回 None。
     """
-    _validate_url(OFFLINE_ASR_MODEL_URL)
-    dest = Path(dest_dir) if dest_dir else offline_asr_dir()
-    dest.mkdir(parents=True, exist_ok=True)
-    archive = str(dest) + "/offline-asr.tar.bz2"
-    print("[ASR] 离线模型未找到，开始自动下载（约 166MB，一次性）")
-    try:
-        subprocess.run(
-            ["curl", "-L", "--fail", "--retry", "3",
-             "-o", archive, OFFLINE_ASR_MODEL_URL],
-            check=True,
-        )
-        print("[ASR] 下载完成，解压中…")
-        with tarfile.open(archive, "r:bz2") as tf:
-            tf.extractall(dest, filter="data")
-        Path(archive).unlink()
-        sub = dest / OFFLINE_ASR_SUBDIR
-        return str(sub if sub.is_dir() else dest)
-    except Exception as e:
-        print(f"[ASR] 离线模型自动下载失败: {e}")
-        print("[ASR] 可手动下载解压到 models/offline_asr/，或设 VUS_ASR_AUTO_DOWNLOAD=0 跳过")
-        if Path(archive).exists():
-            Path(archive).unlink()
-        return None
+    return _download_from_sources(OFFLINE_ASR_SOURCES,
+                                  dest_dir or offline_asr_dir(), "离线 SenseVoice")
 
 
 def ensure_offline_asr_model(model_dir=None, auto=None):
