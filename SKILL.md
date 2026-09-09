@@ -35,21 +35,33 @@ python -m vus.integrated_pipeline --source rtsp --url rtsp://主机/流 --output
 
 产出：`<输出目录>/keyframes/`（镜头级关键帧）、`pipeline_results.json`（时间表+运动段）、`aligned_output.json`（对齐字幕）。已有产物时可跳过本步。
 
+⏱ **耗时预估**：处理速率约 130-160fps，预计耗时 ≈ 视频时长 ÷ 130 × 2（长视频务必给足
+超时；60 分钟视频约需 8-10 分钟）。输出中文日志在 PowerShell 下可能乱码：设
+`PYTHONIOENCODING=utf-8`。
+
 ### 第 2 步：压缩为语义代表帧（Tier 3）
 
 ```bash
 python -m vus.select_representatives --keyframes <输出目录>/keyframes \
-  --max-reps 60 --out representatives.json --report context.md
+  --max-reps 60 --llm-export <输出目录>/llm --out representatives.json --report context.md
 ```
 
-参数选择：`--max-reps 60` 按 LLM 上下文预算自适应选帧（推荐默认）；多人近景
-轮换（圆桌/访谈）加 `--k 3` 每桶保留 3 张互不冗余的代表帧；内容单调的监控流
-加 `--adaptive` 自动放宽；语义增强加 `--clip`。
+参数选择：`--max-reps 60` 按 LLM 上下文预算自适应选帧（推荐默认）；`--llm-export`
+同步产出 640px 缩放帧 + 3×3 联系表 + token 估算；多人近景轮换（圆桌/访谈）加
+`--k 3` 每桶保留 3 张互不冗余的代表帧；内容单调的监控流加 `--adaptive` 自动放宽；
+语义增强加 `--clip`。
 
 ### 第 3 步：读代表帧做内容理解
 
-用 Read 工具读取 `representatives.json` 里的代表帧图片，结合 `context.md`
-与 `aligned_output.json` 理解：
+🔴 **图片读取预算（必须遵守）**：多数模型提供商限制**单请求 ≤30 张图**，且已读图片
+永久占据会话上下文——超限后整个会话无法恢复。因此：
+
+1. **先读联系表**（`--llm-export` 产出的 `grid_*.jpg`，1-3 张拼图即可覆盖全片概貌）
+2. **单帧按需精读 ≤8 张**：首帧、尾帧 + 字幕提示的关键转折
+3. **整次会话累计读图 ≤15 张**（要给用户截图、中间产物留余量）
+4. 理解主力是**字幕文本**（aligned_output.json，零图片成本），图片只做视觉锚定
+
+阅读顺序与要点：
 
 1. **首帧与尾帧必读**——锁定节目类型 + 主题 + 最终结论
 2. 场景构成、人物角色（画面 + 字幕交叉验证）
