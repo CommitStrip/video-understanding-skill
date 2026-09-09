@@ -261,12 +261,19 @@ tests/                     pytest 用例 + 端到端冒烟（含 file-as-live）
 
 ## 🙏 致谢与版权
 
-- [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)——ASR 引擎，由小米
-  （k2-fsa）开源维护。本仓库仅在 `vus/asr_sherpa.py` / `vus/model_setup.py`
-  中做封装；所用模型（SenseVoice int8 与流式 zipformer 双语模型）遵循上游
-  Apache-2.0 协议及模型自身发布条款。对引擎或模型的二次分发、商用请自行
-  遵守上游条款。SenseVoice 来自 FunAudioLLM / 阿里巴巴语音团队。
-- [openai/CLIP](https://github.com/openai/CLIP) ViT-B/32——语义编码器（ONNX 导出）。
+- [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)——ASR engine
+  (Apache-2.0). This repository only wraps it in `vus/asr_sherpa.py` /
+  `vus/model_setup.py`. Model licenses differ: the streaming bilingual
+  zipformer is Apache-2.0; the SenseVoice int8 weights are covered by the
+  FunASR Model Open Source License Agreement v1.1 (use and redistribution
+  allowed with source attribution and model-name retention; converted by
+  k2-fsa from the ASLP-lab/WSYue-ASR SenseVoice fine-tune, base weights by
+  FunAudioLLM / Alibaba). The fallback mirror
+  [CommitStrip/vus-models](https://github.com/CommitStrip/vus-models) ships
+  full `THIRD-PARTY-NOTICES.md` with license texts and per-package
+  provenance. Follow the upstream terms for any redistribution or
+  commercial use.
+- [openai/CLIP](https://github.com/openai/CLIP) ViT-B/32 -- semantic encoder (MIT, ONNX export, optional; fetched from HuggingFace on demand, not redistributed here).
 - [claude-real-video](https://github.com/HUANGCHIHHUNGLeo/claude-real-video)——`bench/` 对比基线。
 
 ## License
