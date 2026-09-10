@@ -80,10 +80,14 @@ python -m vus.device   # prints your hardware, current engines and the exact ins
 
 | Your machine | Install | GPU coverage |
 |------|------|------|
-| NVIDIA (Win/Linux) | `pip install -e ".[gpu-nvidia]"` + the sherpa-onnx CUDA wheel (command in self-check output, ≈190MB) | ASR + CLIP + OCR |
+| NVIDIA (Win/Linux) | `pip install -e ".[gpu-nvidia]"` + the sherpa-onnx CUDA wheel (command in self-check output, ≈190MB) | ASR + CLIP + OCR * |
 | AMD / Intel GPU (Win10+) | `pip install -e ".[directml]"` | CLIP + OCR |
 | Mac (Apple Silicon) | standard wheel ships CoreML — nothing to install | CLIP |
 | No GPU / other | nothing | all CPU (identical to v1.0) |
+
+\* ASR over CUDA depends on the sherpa-onnx CUDA wheel: the upstream Windows wheel currently
+fails to initialize (auto-falls back to CPU; measured in
+[`bench/gpu/GPU_BENCHMARK.md`](bench/gpu/GPU_BENCHMARK.md)). Linux untested.
 
 Enable with `--device auto` (supported by `integrated_pipeline`, `select_representatives --clip` and `vus.live`) or the `VUS_DEVICE=auto` environment variable. If the requested device is unavailable it falls back to CPU with a printed reason — no machine is excluded. The vision chain (OpenCV motion detection / keyframes) stays on CPU: pip OpenCV wheels have no CUDA build, and the measured 147fps shows it is not the bottleneck.
 
@@ -223,6 +227,22 @@ vus carries a **54× per-frame analysis load** and still finishes in about half 
 ### vs claude-real-video (crv)
 
 Four 12-second synthetic clips + a two-level real-video comparison (see `bench/` to reproduce): on the `static` clip crv misses the ending flash entirely (0% coverage) while vus captures it with 2 frames; under the semantic protocol in `bench/semantic_eval/`, redundancy is **1.0 (4 frames / 4 scenes)** vs crv's 12.0 — the same coverage costs **12× less LLM context**.
+
+### GPU acceleration measured (v1.1, RTX 3060 Laptop + Intel iGPU, Win11)
+
+| Execution path (CLIP single frame, 823 real keyframes) | ms/frame | Throughput |
+|---|---|---|
+| CPU (baseline) | **16.0–16.7** | ~62 fps |
+| DirectML @ RTX 3060 | 26.3–26.7 | ~38 fps |
+| DirectML @ Intel Iris Xe iGPU | 25.7 (smoke) | ~39 fps |
+| CUDA @ RTX 3060 | 34.5 | ~29 fps |
+
+Honest conclusion: for **batch-1 CLIP inference the CPU is actually the fastest** (small model +
+CPU↔GPU transfer overhead dominates) — machines with a strong CPU don't need the GPU; DirectML
+is proven working on an Intel iGPU, which is exactly the path AMD/Intel GPU users take. ASR over
+CUDA is currently blocked by the upstream sherpa Windows wheel, but the **automatic CPU fallback
+is proven** (transcription identical after fallback). Full data, negative results and environment
+notes in [`bench/gpu/GPU_BENCHMARK.md`](bench/gpu/GPU_BENCHMARK.md).
 
 <details>
 <summary>📖 Honest notes and comparison caveats</summary>

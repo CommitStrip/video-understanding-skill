@@ -85,6 +85,9 @@ class ClipOnnx:
         self.model_path = model_path
         # 设备经 vus.device 解析：auto/cpu/directml/cuda/coreml，不可用自动回退 cpu
         self.device = resolve_device(device, module="clip", engine="ort")
+        if self.device == "cuda":
+            from .device import preload_cuda_dlls  # pip nvidia-* DLL 免系统级 CUDA 安装
+            preload_cuda_dlls()
         self.session = ort.InferenceSession(
             model_path, providers=ort_provider_list(self.device))
         self.input_name, self.output_name, self.text_inputs = self._probe_io()

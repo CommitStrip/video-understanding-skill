@@ -132,6 +132,48 @@ def sherpa_provider(token):
     return token if token in ("cuda", "coreml") else "cpu"
 
 
+def preload_cuda_dlls():
+    """把 pip 安装的 nvidia-* 运行时 DLL 接入进程搜索路径（CUDA 前置条件）。
+
+    NVIDIA 的 cu12 系列 pip 轮自带 Windows DLL（cudart/cublas/cufft/cudnn），
+    onnxruntime-gpu 与 sherpa-onnx CUDA 轮都依赖它们；系统未装 CUDA Toolkit
+    时由此补齐依赖，无需任何系统级安装。返回成功接入的目录数。
+    """
+    import sysconfig
+    found = 0
+    try:
+        import onnxruntime as ort
+        if hasattr(ort, "preload_dlls"):
+            ort.preload_dlls()
+    except Exception:
+        pass
+    if sys.platform != "win32":
+        return found
+    roots = {sysconfig.get_paths()["purelib"]}
+    try:
+        import site
+        roots.update(site.getsitepackages())
+    except Exception:
+        pass
+    extra = []
+    for root_dir in roots:
+        nvidia = os.path.join(root_dir, "nvidia")
+        if not os.path.isdir(nvidia):
+            continue
+        for root, _dirs, files in os.walk(nvidia):
+            if any(f.lower().endswith(".dll") for f in files):
+                extra.append(root)
+    for d in extra:
+        try:
+            os.add_dll_directory(d)
+            found += 1
+        except Exception:
+            pass
+    if extra:
+        os.environ["PATH"] = os.pathsep.join(extra) + os.pathsep + os.environ.get("PATH", "")
+    return found
+
+
 def _nvidia_gpus():
     """探测 NVIDIA 显卡（nvidia-smi 可用时返回名称列表，否则 []）。"""
     import subprocess

@@ -81,10 +81,13 @@ python -m vus.device   # 打印本机硬件、当前引擎与对应的安装命�
 
 | 你的机器 | 安装 | GPU 生效范围 |
 |------|------|------|
-| NVIDIA（Win/Linux） | `pip install -e ".[gpu-nvidia]"` + sherpa-onnx CUDA 轮（命令见自检输出，≈190MB） | ASR + CLIP + OCR |
+| NVIDIA（Win/Linux） | `pip install -e ".[gpu-nvidia]"` + sherpa-onnx CUDA 轮（命令见自检输出，≈190MB） | ASR + CLIP + OCR * |
 | AMD / Intel 显卡（Win10+） | `pip install -e ".[directml]"` | CLIP + OCR |
 | Mac（Apple Silicon） | 标准轮自带 CoreML，无需安装 | CLIP |
 | 无 GPU / 其他 | 不装 | 全部 CPU（行为与 v1.0 完全一致） |
+
+\* ASR 的 CUDA 路径依赖 sherpa-onnx CUDA 轮：Windows 上游轮子暂有初始化问题（会自动回退
+CPU，实测见 [`bench/gpu/GPU_BENCHMARK.md`](bench/gpu/GPU_BENCHMARK.md)），Linux 待实测。
 
 启用：`--device auto`（`integrated_pipeline` / `select_representatives --clip` / `vus.live` 三个入口均支持）或环境变量 `VUS_DEVICE=auto`。请求的设备不可用时自动回退 CPU 并打印原因——任何机器都不被排除。画面链（OpenCV 运动检测/关键帧）保持 CPU：pip 轮子无 CUDA 构建，且该层实测 147fps 不是瓶颈。
 
@@ -225,6 +228,21 @@ vus 在**54 倍逐帧分析负载**下，端到端耗时仍只有基线的约一
 ### 与 claude-real-video（crv）对比
 
 4 组 12 秒合成片段 + 真实视频双层对比（复现见 `bench/`）：`static` 片段 crv 完全漏掉片尾突变（覆盖率 0%），本技能 2 帧完整捕获；`bench/semantic_eval/` 语义协议下冗余度 **1.0（4 帧/4 场景）** vs crv 12.0——同等覆盖率下 LLM 上下文成本省 12 倍。
+
+### GPU 加速实测（v1.1，RTX 3060 Laptop + Intel 核显，Win11）
+
+| 执行路径（CLIP 单帧，823 帧真实关键帧） | ms/帧 | 实时倍率 |
+|---|---|---|
+| CPU（基线） | **16.0–16.7** | ~62 fps |
+| DirectML @ RTX 3060 | 26.3–26.7 | ~38 fps |
+| DirectML @ Intel Iris Xe 核显 | 25.7（冒烟） | ~39 fps |
+| CUDA @ RTX 3060 | 34.5 | ~29 fps |
+
+诚实结论：**batch=1 的 CLIP 单帧推理 CPU 反而最快**（小模型 + CPU↔GPU 往返开销占主导），
+强 CPU 机器无需开 GPU；DirectML 在 Intel 核显上实证可用，这正是 AMD/Intel 显卡用户的路径。
+ASR CUDA 在 Windows 上游 sherpa 轮子暂不可用，但**自动回退 CPU 已实证有效**（回退后转写
+文本逐字一致）。完整数据、反面结论与环境注意事项见
+[`bench/gpu/GPU_BENCHMARK.md`](bench/gpu/GPU_BENCHMARK.md)。
 
 <details>
 <summary>📖 诚实说明与对比口径</summary>

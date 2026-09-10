@@ -137,6 +137,9 @@ def load_streaming_recognizer(model_dir=None, provider=None):
         return None
 
     provider = provider or "cpu"
+    if provider == "cuda":
+        from .device import preload_cuda_dlls  # pip nvidia-* DLL 免系统级 CUDA 安装
+        preload_cuda_dlls()
     for attempt in (provider, "cpu") if provider != "cpu" else ("cpu",):
         try:
             recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
@@ -406,7 +409,9 @@ def load_offline_recognizer(model_dir=None, provider=None):
     if not tokens:
         raise RuntimeError(f"离线模型目录缺少 tokens.txt: {model_dir}")
     provider = provider or "cpu"
-    last_err = None
+    if provider == "cuda":
+        from .device import preload_cuda_dlls  # pip nvidia-* DLL 免系统级 CUDA 安装
+        preload_cuda_dlls()
     for attempt in (provider, "cpu") if provider != "cpu" else ("cpu",):
         try:
             recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(

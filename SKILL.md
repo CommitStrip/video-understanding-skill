@@ -93,7 +93,7 @@ python -m vus.device   # 自检：打印本机硬件、已装引擎与精确安�
 | | |
 |---|---|
 | ✅ 优点 | 文件转写 RTF 显著下降（离线 SenseVoice 是最大受益者）；CLIP 语义选帧、OCR 同样提速；NVIDIA/AMD/Intel/Mac 全覆盖 |
-| ❌ 缺点 | 需按显卡安装对应 onnxruntime 轮（与 CPU 轮同包名互斥）；sherpa CUDA 轮另需 ~190MB 下载；DirectML/CoreML 不加速 ASR |
+| ❌ 缺点 | 需按显卡安装对应 onnxruntime 轮（与 CPU 轮同包名互斥）；sherpa CUDA 轮另需 ~190MB 下载；DirectML/CoreML 不加速 ASR；Windows 的 sherpa CUDA 轮暂有上游初始化问题（自动回退 CPU，实测见 bench/gpu/GPU_BENCHMARK.md） |
 | 适用 | NVIDIA 显卡（全套收益）；任何想缩短转写耗时的场景 |
 | 不适用 | 无 GPU 机器（CPU 本就 5.9× 实时）；画面链无 GPU 路径（设计如此） |
 
