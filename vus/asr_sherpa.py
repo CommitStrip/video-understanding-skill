@@ -73,10 +73,12 @@ def load_wav(wav_path, sr=16000):
         return np.array([]), sr
 
 
-def load_streaming_recognizer(model_dir=None):
+def load_streaming_recognizer(model_dir=None, provider=None):
     """
     加载 sherpa-onnx 流式识别器
     模型: sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20
+    provider: sherpa-onnx 执行提供者（cpu/cuda/coreml，None=cpu）。
+              GPU 加载失败时打印原因并自动回退 cpu 重试（--device 的兜底语义）。
     """
     try:
         import sherpa_onnx
@@ -134,25 +136,30 @@ def load_streaming_recognizer(model_dir=None):
         print("[ASR] 流式模型文件不完整，使用 fallback 模式")
         return None
 
-    try:
-        recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
-            encoder=encoder,
-            decoder=decoder,
-            joiner=joiner,
-            tokens=tokens,
-            num_threads=2,
-            enable_endpoint_detection=True,
-            rule1_min_trailing_silence=2.4,
-            rule2_min_trailing_silence=1.2,
-            rule3_min_utterance_length=20,
-            decoding_method="greedy_search",
-            provider="cpu",
-        )
-        print(f"[ASR] 流式识别器加载成功")
-        return recognizer
-    except Exception as e:
-        print(f"[ASR] 加载识别器失败: {e}，使用 fallback 模式")
-        return None
+    provider = provider or "cpu"
+    for attempt in (provider, "cpu") if provider != "cpu" else ("cpu",):
+        try:
+            recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
+                encoder=encoder,
+                decoder=decoder,
+                joiner=joiner,
+                tokens=tokens,
+                num_threads=2,
+                enable_endpoint_detection=True,
+                rule1_min_trailing_silence=2.4,
+                rule2_min_trailing_silence=1.2,
+                rule3_min_utterance_length=20,
+                decoding_method="greedy_search",
+                provider=attempt,
+            )
+            print("[ASR] 流式识别器加载成功"
+                  + (f"（provider={attempt}）" if attempt != "cpu" else ""))
+            return recognizer
+        except Exception as e:
+            if attempt == "cpu":
+                print(f"[ASR] 加载识别器失败: {e}，使用 fallback 模式")
+                return None
+            print(f"[ASR] provider={attempt} 加载失败({e})，回退 cpu 重试")
 
 
 def _token_timestamps(recognizer, stream):
@@ -357,11 +364,13 @@ def _mock_transcribe(samples, sr=16000, chunk_sec=2.0):
 # 离线识别需求统一走 transcribe_streaming（W2 实时源波次再评估真离线模型）。
 
 
-def load_offline_recognizer(model_dir=None):
+def load_offline_recognizer(model_dir=None, provider=None):
     """加载 SenseVoice 离线识别器（非流式，全上下文解码）。
 
     中文专名与可读性显著优于流式 zipformer（流式上下文窗口短），
     用于文件转写默认路径；对 BGM 鲁棒。模型经 model_setup 自动下载。
+    provider: sherpa-onnx 执行提供者（cpu/cuda/coreml，None=cpu）；
+              GPU 加载失败时打印原因并自动回退 cpu 重试。
     返回识别器对象；模型缺失/加载失败时抛 RuntimeError（默认路径不静默降级）。
     """
     try:
@@ -396,14 +405,25 @@ def load_offline_recognizer(model_dir=None):
             break
     if not tokens:
         raise RuntimeError(f"离线模型目录缺少 tokens.txt: {model_dir}")
-    recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
-        model=model_file,
-        tokens=tokens,
-        num_threads=2,
-        use_itn=True,
-    )
-    print("[ASR] 离线识别器（SenseVoice int8）加载成功")
-    return recognizer
+    provider = provider or "cpu"
+    last_err = None
+    for attempt in (provider, "cpu") if provider != "cpu" else ("cpu",):
+        try:
+            recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+                model=model_file,
+                tokens=tokens,
+                num_threads=2,
+                use_itn=True,
+                provider=attempt,
+            )
+            print("[ASR] 离线识别器（SenseVoice int8）加载成功"
+                  + (f"（provider={attempt}）" if attempt != "cpu" else ""))
+            return recognizer
+        except Exception as e:
+            last_err = e
+            if attempt != "cpu":
+                print(f"[ASR] provider={attempt} 加载失败({e})，回退 cpu 重试")
+    raise RuntimeError(f"离线识别器加载失败: {last_err}")
 
 
 def transcribe_offline(recognizer, samples, sr=16000, window_sec=15.0):

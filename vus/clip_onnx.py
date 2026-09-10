@@ -5,6 +5,9 @@ clip_onnx.py - CLIP 视觉塔 ONNX 推理（去 torch 依赖的语义增强引�
 W3（2026-09-02）：把 Tier3 代表帧选择的 CLIP 语义增强从 torch + openai-clip
 迁移到 onnxruntime CPU 推理，安装体积从数 GB（torch CUDA 全家桶）降到
 几十 MB（onnxruntime CPU），且权重一次性下载、离线可用。
+v1.1（2026-09-10）：设备经 vus.device 解析——CPU 仍是默认；安装
+onnxruntime-gpu / onnxruntime-directml 后 --device auto 即可启用 GPU
+（DirectML 覆盖 NVIDIA/AMD/Intel 全系显卡）。
 
 模型文件约定: <model_dir>/clip-visual-vitb32.onnx
   来源两种：
@@ -28,6 +31,8 @@ import os
 
 import cv2
 import numpy as np
+
+from .device import ort_provider_list, resolve_device
 
 MODEL_FILENAME = "clip-visual-vitb32.onnx"
 
@@ -57,7 +62,7 @@ def resolve_model_dir(model_dir=None):
 
 
 class ClipOnnx:
-    """CLIP 视觉塔 ONNX 推理器（onnxruntime CPU）。
+    """CLIP 视觉塔 ONNX 推理器（onnxruntime；CPU 默认，GPU 经 --device/VUS_DEVICE 启用）。
 
     用法:
         enc = ClipOnnx("./models")
@@ -65,7 +70,7 @@ class ClipOnnx:
         d = cosine_dist(vec_a, vec_b)
     """
 
-    def __init__(self, model_dir=None):
+    def __init__(self, model_dir=None, device=None):
         model_path = os.path.join(resolve_model_dir(model_dir), MODEL_FILENAME)
         if not os.path.isfile(model_path):
             raise RuntimeError(DOWNLOAD_HINT.format(
@@ -78,8 +83,10 @@ class ClipOnnx:
                 "（或 pip install onnxruntime）"
             ) from e
         self.model_path = model_path
-        # CPU 固定：语义增强仅作离线 Tier3 增强，绝无 GPU 假设
-        self.session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+        # 设备经 vus.device 解析：auto/cpu/directml/cuda/coreml，不可用自动回退 cpu
+        self.device = resolve_device(device, module="clip", engine="ort")
+        self.session = ort.InferenceSession(
+            model_path, providers=ort_provider_list(self.device))
         self.input_name, self.output_name, self.text_inputs = self._probe_io()
 
     # CLIP 词表 EOS token id（文本塔占位输入用；图像嵌入与其数值无关）

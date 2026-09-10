@@ -92,11 +92,13 @@ class StreamingConsumer:
             }
 
 
-def _asr_job(video_path, wav_path, out_segments, sr=16000, mode="auto"):
+def _asr_job(video_path, wav_path, out_segments, sr=16000, mode="auto",
+             provider=None):
     """后台声音链：ASR 转写，阻塞直到完成，写入 out_segments。
 
     mode: auto(默认)=文件转写走离线 SenseVoice（全上下文，专名/可读性更优），
           离线不可用时回退流式；streaming=强制流式路径。
+    provider: sherpa-onnx 执行提供者（None=cpu；GPU 加载失败在加载器内部回退 cpu）。
     """
     samples, sr2 = load_wav(wav_path, sr)
     if len(samples) == 0:
@@ -106,13 +108,13 @@ def _asr_job(video_path, wav_path, out_segments, sr=16000, mode="auto"):
     if mode in ("auto", "offline"):
         try:
             from .asr_sherpa import load_offline_recognizer, transcribe_offline
-            recognizer = load_offline_recognizer()
+            recognizer = load_offline_recognizer(provider=provider)
             out_segments.extend(
                 clean_asr_segments(transcribe_offline(recognizer, samples, sr2)))
             return
         except Exception as e:
             print(f"[ASR] 离线转写不可用({e})，回退流式")
-    recognizer = load_streaming_recognizer()
+    recognizer = load_streaming_recognizer(provider=provider)
     segs = transcribe_streaming(recognizer, samples, sr2)
     out_segments.extend(clean_asr_segments(segs))
 
@@ -146,7 +148,7 @@ def prune_keyframes(keyframes_dir, max_mb):
 
 def run_realtime_pipeline(video_path=None, output_dir=None, save_keyframes=True,
                           config=None, on_event=None, source: FrameSource = None,
-                          ocr=False, max_keyframe_mb=0):
+                          ocr=False, max_keyframe_mb=0, device=None):
     """
     实时流式主流程：画面链前台逐帧 + 声音链后台并行。
 
@@ -163,6 +165,9 @@ def run_realtime_pipeline(video_path=None, output_dir=None, save_keyframes=True,
                 的 "ocr_events" 键，并经 reconcile 对 ASR 段标注 ocr_hint。
                 开启时自动保存关键帧（OCR 输入）。rapidocr 未安装时显式报错
                 （不静默降级），依赖懒加载——不开 OCR 时零额外依赖。
+      device:   推理设备请求（auto/cpu/cuda/directml/coreml/rocm，默认 auto），
+                经 vus.device 解析；ASR 与 OCR 各自择优，不可用回退 cpu。
+                实际生效设备写入 aligned_output.json 的 "device" 键（溯源用）。
 
     时间戳:
       直播源（Camera/RTSP）事件用 source.read() 返回的单调时钟 timestamp；
@@ -227,10 +232,15 @@ def run_realtime_pipeline(video_path=None, output_dir=None, save_keyframes=True,
     asr_thread = None
     # W8 借鉴 crv：文件转写默认走离线模型（全上下文）；VUS_ASR_MODE=streaming 可强制流式
     asr_mode = os.environ.get("VUS_ASR_MODE", "auto")
+    # v1.1: 设备解析（ASR 与 OCR 支持面不同，各自择优；不可用回退 cpu）
+    from .device import resolve_device, sherpa_provider
+    asr_device = resolve_device(device, module="asr", engine="sherpa")
+    asr_provider = sherpa_provider(asr_device)
     if wav_path and os.path.exists(wav_path):
         asr_thread = threading.Thread(target=_asr_job,
                                       args=(video_path, wav_path, asr_segments),
-                                      kwargs={"mode": asr_mode},
+                                      kwargs={"mode": asr_mode,
+                                              "provider": asr_provider},
                                       daemon=True)
         asr_thread.start()
 
@@ -321,10 +331,12 @@ def run_realtime_pipeline(video_path=None, output_dir=None, save_keyframes=True,
     # W6: 文字链（OCR）——管线完成后仅对 Tier3 语义代表帧执行（不在逐帧路径）。
     # 抖音实测：823 关键帧逐帧 OCR 会把管线拖到 1:1 实时；Tier3 定点 OCR 快约 25 倍。
     ocr_events = []
+    ocr_device = None
     if ocr:
         from .ocr_channel import OcrChannel  # 懒加载：rapidocr 未安装时显式抛 RuntimeError
         from .select_representatives import select_representatives
-        ocr_channel = OcrChannel()
+        ocr_device = resolve_device(device, module="ocr", engine="ort")
+        ocr_channel = OcrChannel(device=ocr_device)
         reps = select_representatives(keyframes_dir, interval=60)
         print(f"[Pipeline] OCR: 对 {len(reps)} 张 Tier3 代表帧执行…")
         for rep in reps:
@@ -350,6 +362,7 @@ def run_realtime_pipeline(video_path=None, output_dir=None, save_keyframes=True,
         "ocr_events": ocr_events,
         "attention_windows": attention_windows,
         "pipeline_summary": summary,
+        "device": {"asr": asr_device, "ocr": ocr_device},
         "stream_event_count": consumer.snapshot()["event_count"]
     })
 
@@ -427,6 +440,10 @@ def main():
                         help='启用 OCR 第三通道（W3, 默认关）：对关键帧稀疏识别画面文字，'
                              '事件并入 aligned_output.json 的 ocr_events。'
                              '需要 pip install -e ".[ocr]"')
+    parser.add_argument('--device', default=None,
+                        help='推理设备: auto(默认,自动择优) / cpu / cuda / directml / '
+                             'coreml / rocm；不可用时自动回退 cpu。'
+                             'GPU 引擎安装方法见 python -m vus.device')
     args = parser.parse_args()
 
     # ---- 按帧源类型构造 FrameSource ----
@@ -452,7 +469,8 @@ def main():
             config=config,
             source=source,
             ocr=args.ocr,
-            max_keyframe_mb=args.max_keyframe_mb
+            max_keyframe_mb=args.max_keyframe_mb,
+            device=args.device
         )
     except KeyboardInterrupt:
         # 兜底：中断发生在帧循环之外（如对齐/落盘阶段）。

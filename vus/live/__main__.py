@@ -39,6 +39,10 @@ def main(argv=None):
                         help="T2 触发式调用的地板间隔秒数（费用上限旋钮，默认 8）")
     parser.add_argument("--audio", choices=["auto", "off"], default="auto",
                         help="声音链开关（auto=文件/RTSP 有音轨即启用）")
+    parser.add_argument("--device", default=None,
+                        help="推理设备: auto(默认,自动择优) / cpu / cuda / coreml / "
+                             "directml / rocm；流式 ASR 不可用时自动回退 cpu。"
+                             "安装方法见 python -m vus.device")
     parser.add_argument("--serve", action="store_true", help="起 SSE 状态服务")
     parser.add_argument("--port", type=int, default=8600, help="SSE 服务端口（默认 8600）")
     parser.add_argument("--quiet", action="store_true", help="减少控制台输出")
@@ -53,7 +57,7 @@ def main(argv=None):
     try:
         ret = run_live(source, output_dir=args.output, config=config,
                        live_cfg=live_cfg, vlm=vlm, serve=args.serve,
-                       port=args.port, audio=args.audio,
+                       port=args.port, audio=args.audio, device=args.device,
                        save_keyframes=not args.no_keyframes, quiet=args.quiet)
     except KeyboardInterrupt:
         print("\n[Live] 收到中断，已保存部分结果")

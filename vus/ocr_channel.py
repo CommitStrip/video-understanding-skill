@@ -26,12 +26,16 @@ _OCR_PACKAGE = "rapidocr-onnxruntime"
 class OcrChannel:
     """rapidocr-onnxruntime 封装：关键帧 -> 文字事件列表。
 
+    device: 经 vus.device 解析（--device / VUS_DEVICE）。cuda/directml 时对
+    det/cls/rec 三个模型分别转发 use_cuda / use_dml（rapidocr 1.4+ 原生支持）；
+    解析结果不可用时自动回退 cpu（与全局设备语义一致）。
+
     用法:
         ocr = OcrChannel()                      # 缺包时这里抛 RuntimeError
         events = ocr.process(frame_bgr, 12.3)   # [{"t","type":"ocr","text","conf"}]
     """
 
-    def __init__(self):
+    def __init__(self, device=None):
         try:
             from rapidocr_onnxruntime import RapidOCR
         except ImportError as e:
@@ -39,8 +43,15 @@ class OcrChannel:
                 f"启用 OCR 通道需要安装 {_OCR_PACKAGE}: "
                 f"pip install -e \".[ocr]\"（或 pip install {_OCR_PACKAGE}）"
             ) from e
-        # RapidOCR 自带检测+方向分类+识别三模型，默认配置即可用
-        self._engine = RapidOCR()
+        from .device import resolve_device
+        self.device = resolve_device(device, module="ocr", engine="ort")
+        # RapidOCR 自带检测+方向分类+识别三模型；GPU EP 按设备逐模型开启
+        kwargs = {}
+        if self.device == "cuda":
+            kwargs = {"det_use_cuda": True, "cls_use_cuda": True, "rec_use_cuda": True}
+        elif self.device == "directml":
+            kwargs = {"det_use_dml": True, "cls_use_dml": True, "rec_use_dml": True}
+        self._engine = RapidOCR(**kwargs)
 
     def process(self, frame_bgr, timestamp):
         """对单帧跑 OCR，返回按置信度过滤后的文字事件列表。

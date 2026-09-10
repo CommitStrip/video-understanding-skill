@@ -85,7 +85,8 @@ def _asr_live_job(stream, sasr, cleaner, publish, asr_segments, stop_evt):
 
 def run_live(source, output_dir=None, config=None, live_cfg=None,
              vlm=None, labeler=None, serve=False, port=8600, audio="auto",
-             save_keyframes=True, status_interval=10.0, quiet=False):
+             save_keyframes=True, status_interval=10.0, quiet=False,
+             device=None):
     """四层实时理解主流程（阻塞运行直到流结束或 Ctrl-C）。
 
     参数:
@@ -95,6 +96,8 @@ def run_live(source, output_dir=None, config=None, live_cfg=None,
       vlm:     VLM 后端实例；None = 关闭 T2（纯本地 T0+T0.5 模式）。
       labeler: 标签道实例；True=默认 basic；False=关闭 T0.5。
       audio:   "auto"（文件/RTSP 有音轨就走声音链）/ "off"。
+      device:  推理设备请求（auto/cpu/cuda/coreml…，默认 auto）；流式 ASR 经
+               vus.device 解析，不可用自动回退 cpu。
       serve:   起本地 SSE 服务（/state /events /healthz）。
       status_interval: 控制台理解状态行打印间隔（秒）。
 
@@ -148,7 +151,10 @@ def run_live(source, output_dir=None, config=None, live_cfg=None,
     stop_evt = threading.Event()
     video_path = getattr(source, "video_path", None)
     if audio != "off" and live_cfg.get("asr_trigger", True):
-        recognizer = load_streaming_recognizer()
+        from ..device import resolve_device, sherpa_provider
+        asr_provider = sherpa_provider(
+            resolve_device(device, module="asr", engine="sherpa"))
+        recognizer = load_streaming_recognizer(provider=asr_provider)
         if recognizer is None:
             print("[Live] 声音链: sherpa-onnx 不可用，跳过（画面链与理解层不受影响）")
         else:

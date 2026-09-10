@@ -119,14 +119,22 @@ def _clip_dist(a, b):
 # 桶内选帧打分公式不变：w_pix*pixel_diff + (1-w_pix)*语义距离。
 
 class OnnxClipEngine:
-    """默认引擎：onnxruntime CPU 推理（去 torch 依赖），距离用 clip_onnx.cosine_dist。"""
+    """默认引擎：onnxruntime 推理（去 torch 依赖），距离用 clip_onnx.cosine_dist。
+
+    device: 经 vus.device 解析（None=auto），安装对应 ORT GPU 轮后自动生效，
+    不可用回退 cpu。
+    """
 
     name = "onnx"
 
-    def __init__(self, model_dir=None):
+    def __init__(self, model_dir=None, device=None):
         from .clip_onnx import ClipOnnx, cosine_dist
         self._cosine_dist = cosine_dist
-        self.backend = ClipOnnx(model_dir)   # 缺模型/缺包时显式抛 RuntimeError
+        self.backend = ClipOnnx(model_dir, device=device)   # 缺模型/缺包时显式抛 RuntimeError
+
+    @property
+    def device(self):
+        return self.backend.device
 
     @property
     def model_path(self):
@@ -174,13 +182,14 @@ def _as_clip_engine(clip):
     raise TypeError(f"无法识别的 CLIP 引擎参数: {type(clip)!r}")
 
 
-def load_clip_onnx(model_dir=None):
+def load_clip_onnx(model_dir=None, device=None):
     """加载 ONNX CLIP 引擎（--clip 默认路径，无 torch 依赖）。
 
     模型目录查找顺序: model_dir 参数 > 环境变量 VUS_CLIP_MODELS > ./models。
+    device: 推理设备请求（None=auto），经 vus.device 解析。
     模型缺失 / onnxruntime 缺失时抛 RuntimeError（含下载指引），不静默降级。
     """
-    return OnnxClipEngine(model_dir)
+    return OnnxClipEngine(model_dir, device=device)
 
 
 def load_keyframes(kf_dir):
@@ -428,6 +437,9 @@ def main():
                          "隐含 --clip，向后兼容)")
     ap.add_argument("--clip-models-dir", default=None,
                     help="CLIP ONNX 模型目录(默认: $VUS_CLIP_MODELS > ./models)")
+    ap.add_argument("--device", default=None,
+                    help="CLIP(ONNX 引擎)推理设备: auto(默认) / cpu / cuda / directml / "
+                         "coreml / rocm；不可用自动回退 cpu。安装方法见 python -m vus.device")
     ap.add_argument("--w-pix", type=float, default=0.5,
                     help="CLIP 混合权重中像素差分的占比(0-1, 默认0.5, 其余为CLIP语义距离)")
     ap.add_argument("--k", type=int, default=1,
@@ -462,12 +474,14 @@ def main():
             if args.clip_torch:
                 clip_engine = TorchClipEngine()
             else:
-                clip_engine = load_clip_onnx(args.clip_models_dir)
+                clip_engine = load_clip_onnx(args.clip_models_dir,
+                                             device=args.device)
         except RuntimeError as e:
             sys.exit(f"[Select] 错误: {e}")
         extra = f", 模型 {clip_engine.model_path}" if clip_engine.name == "onnx" else ""
+        dev = f", 设备 {getattr(clip_engine, 'device', 'cpu')}" if clip_engine.name == "onnx" else ""
         print(f"[Select] CLIP 语义增强已启用 (引擎 {clip_engine.name}, "
-              f"模型加载 {time.time()-t0:.1f}s{extra})")
+              f"模型加载 {time.time()-t0:.1f}s{extra}{dev})")
 
     info = summarize(args.keyframes)
     print(f"[Select] 管线关键帧: {info['count']} 帧, 跨度 {info['span_s']}s, "

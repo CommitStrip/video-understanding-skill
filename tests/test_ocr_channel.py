@@ -38,7 +38,7 @@ class _FakeRapidOCR:
 def fake_rapidocr(monkeypatch):
     engine = _FakeRapidOCR()
     fake = types.ModuleType("rapidocr_onnxruntime")
-    fake.RapidOCR = lambda: engine
+    fake.RapidOCR = lambda *a, **k: engine
     monkeypatch.setitem(sys.modules, "rapidocr_onnxruntime", fake)
     return engine
 
