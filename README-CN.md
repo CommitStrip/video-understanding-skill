@@ -32,7 +32,8 @@ vus 把 30fps 的原始视频（十几万帧）压缩成**语义代表帧 + 时�
 - **双语 ASR 双通道**——文件转写默认走 SenseVoice int8 离线模型（全上下文解码，A 级可读性，对 BGM 鲁棒）；直播音频走流式 zipformer 通道（词级时间戳）。模型缺失时显式降级、绝不静默造假。
 - **LLM 友好导出**——代表帧自动缩放到 640px + 3×3 联系表拼图 + token 预算估算，跑之前就知道上下文成本。
 - **可选语义增强**——CLIP（ONNX，不依赖 PyTorch）语义选帧；OCR 通道提取内嵌文字。
-- **可安装、有测试**——`pip install -e .`，200+ pytest 用例，GitHub Actions CI。
+- **GPU 加速（v1.1）**——厂商无关的 `--device auto`：NVIDIA（CUDA）/ Windows 任意 DX12 显卡（DirectML）/ Apple Silicon（CoreML），不可用自动回退 CPU。
+- **可安装、有测试**——`pip install -e .`，280+ pytest 用例，GitHub Actions CI。
 
 ## 📦 安装
 
@@ -69,6 +70,24 @@ bash scripts/download_clip_onnx.sh   # CLIP ONNX
 
 > ⚠️ 未下载模型时字幕通道退化为 **mock 占位输出——是假文本，不是真实转写**。严禁把 mock 字幕当作真实内容交付。
 
+## ⚡ GPU 加速（可选，v1.1）
+
+默认 CPU 即全速运行（画面链 5.9× 实时，无需 GPU）。需要更快的转写与语义选帧时，
+先跑自检、再按机器类型选装其一（三种 onnxruntime 轮子同包名互斥）：
+
+```bash
+python -m vus.device   # 打印本机硬件、当前引擎与对应的安装命令
+```
+
+| 你的机器 | 安装 | GPU 生效范围 |
+|------|------|------|
+| NVIDIA（Win/Linux） | `pip install -e ".[gpu-nvidia]"` + sherpa-onnx CUDA 轮（命令见自检输出，≈190MB） | ASR + CLIP + OCR |
+| AMD / Intel 显卡（Win10+） | `pip install -e ".[directml]"` | CLIP + OCR |
+| Mac（Apple Silicon） | 标准轮自带 CoreML，无需安装 | CLIP |
+| 无 GPU / 其他 | 不装 | 全部 CPU（行为与 v1.0 完全一致） |
+
+启用：`--device auto`（`integrated_pipeline` / `select_representatives --clip` / `vus.live` 三个入口均支持）或环境变量 `VUS_DEVICE=auto`。请求的设备不可用时自动回退 CPU 并打印原因——任何机器都不被排除。画面链（OpenCV 运动检测/关键帧）保持 CPU：pip 轮子无 CUDA 构建，且该层实测 147fps 不是瓶颈。
+
 ## 🚀 快速开始
 
 ```bash
@@ -88,7 +107,8 @@ python -m vus.select_representatives --keyframes out/keyframes \
 python -m vus.select_representatives --keyframes out/keyframes \
   --interval 60 --k 3 --out representatives.json
 
-# 3. 把 out/llm/ 图片 + context.md + aligned_output.json 交给多模态大模型，
+# 3. 把 out/llm/ 图片 + context.md + aligned_output.json 交给大模型：
+#    多模态模型图片+字幕一起读；纯文本模型读 context.md + 字幕即可
 #    生成课程讲义 / 剧情摘要 / 场景分析报告
 ```
 
@@ -224,6 +244,7 @@ vus/                       可安装核心（pip install -e .）
   asr_sherpa.py            双 ASR 通道：离线 SenseVoice（文件默认）+
                            流式 zipformer（直播），共享清洗
   asr_clean.py             ASR 输出清洗（循环折叠 + 去重 + 幻觉标记）
+  device.py                厂商无关设备解析 + 自检命令（v1.1）
   select_representatives.py Tier3 语义选帧（--k/--adaptive/--clip/--max-reps）
   llm_export.py            LLM 友好导出（640px 缩放 + 联系表 + token 估算）
   source.py                FileSource / CameraSource / RTSPSource

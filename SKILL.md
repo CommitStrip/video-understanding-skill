@@ -83,6 +83,24 @@ pip install sherpa-onnx
 模型目录可用环境变量 `VUS_SHERPA_MODELS` 指定。
 </details>
 
+<details>
+<summary>⚡ GPU 加速（--device auto，v1.1）</summary>
+
+```bash
+python -m vus.device   # 自检：打印本机硬件、已装引擎与精确安装命令
+```
+
+| | |
+|---|---|
+| ✅ 优点 | 文件转写 RTF 显著下降（离线 SenseVoice 是最大受益者）；CLIP 语义选帧、OCR 同样提速；NVIDIA/AMD/Intel/Mac 全覆盖 |
+| ❌ 缺点 | 需按显卡安装对应 onnxruntime 轮（与 CPU 轮同包名互斥）；sherpa CUDA 轮另需 ~190MB 下载；DirectML/CoreML 不加速 ASR |
+| 适用 | NVIDIA 显卡（全套收益）；任何想缩短转写耗时的场景 |
+| 不适用 | 无 GPU 机器（CPU 本就 5.9× 实时）；画面链无 GPU 路径（设计如此） |
+
+启用：命令加 `--device auto`（或环境变量 `VUS_DEVICE=auto`）。不可用自动回退 CPU 并打印原因。
+未启用 GPU 时在报告注明"GPU 加速未启用（CPU 运行）"。
+</details>
+
 > **Agent 行为规范**：安装技能时执行"必装"部分的命令。遇到 CLIP/OCR/直播
 > 场景时，向用户展示上面对照表并询问是否安装。用户拒绝时不安装、不影响
 > 核心功能，但在产出报告中注明"XX 增强未启用"。
