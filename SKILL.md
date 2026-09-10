@@ -16,7 +16,8 @@ pip install -e ".[asr]"
 ```
 
 这会安装 sherpa-onnx + 自动下载 **SenseVoice int8 离线模型**（166MB，
-sherpa-onnx 官方源或 CommitStrip/vus-models mirror，首次运行自动下载）。
+下载链：sherpa-onnx 官方源 → hf-mirror.com 国内镜像 → CommitStrip/vus-models
+mirror，逐源 sha256 校验 + 断点续传，首次运行自动下载）。
 这是文件转写的**默认 ASR 通道**——没有它字幕退化为 mock 假文本，管线不可用。
 
 安装命令拆解：

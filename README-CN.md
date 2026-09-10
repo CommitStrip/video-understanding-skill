@@ -62,6 +62,7 @@ pip install -e ".[ocr]"          # OCR 通道
 
 ```bash
 mkdir -p models/sherpa
+# 官方源；国内直连可换 hf-mirror.com/csukuangfj/<同名仓库>/resolve/main/<文件>
 curl -L -o - https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2 \
   | tar -xj -C models/sherpa --strip-components=1
 bash scripts/download_clip_onnx.sh   # CLIP ONNX
